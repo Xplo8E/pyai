@@ -33,6 +33,8 @@ from ..types import (
     TextStartEvent,
     ThinkingContent,
     ThinkingDeltaEvent,
+    ThinkingEndEvent,
+    ThinkingStartEvent,
     ToolCall,
     ToolCallContent,
     ToolCallDeltaEvent,
@@ -245,6 +247,7 @@ class _StreamProcessor:
                     self._current_item = {"type": "reasoning", "summary": []}
                     self._current_block = {"type": "thinking", "thinking": "", "summary_parts": []}
                     # Don't append to output.content yet — done on output_item.done
+                    yield ThinkingStartEvent()
 
                 elif item_type == "message":
                     self._current_item = {"type": "message", "id": item.get("id", ""), "content": []}
@@ -405,6 +408,7 @@ class _StreamProcessor:
                     thinking_block = ThinkingContent(thinking=thinking_text)
                     self._output.content.append(thinking_block)
                     self._current_block = None
+                    yield ThinkingEndEvent(thinking=thinking_text)
 
                 elif item_type == "message" and self._current_block and self._current_block.get("type") == "text":
                     # Join all content parts into final text

@@ -30,6 +30,9 @@ from .agent import agent
 from .mcp import MCPHub, MCPServer
 from .stream import complete, complete_text, stream
 from .types import (
+    AgentToolCallEvent,
+    AgentToolResultEvent,
+    AgentTurnEndEvent,
     AssistantMessage,
     Context,
     DoneEvent,
@@ -38,6 +41,8 @@ from .types import (
     TextEndEvent,
     TextStartEvent,
     ThinkingDeltaEvent,
+    ThinkingEndEvent,
+    ThinkingStartEvent,
     Tool,
     ToolCall,
     ToolCallContent,
@@ -48,7 +53,7 @@ from .types import (
     UserMessage,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "agent",
@@ -67,10 +72,15 @@ __all__ = [
     "TextStartEvent",
     "TextDeltaEvent",
     "TextEndEvent",
+    "ThinkingStartEvent",
     "ThinkingDeltaEvent",
+    "ThinkingEndEvent",
     "ToolCallStartEvent",
     "ToolCallDeltaEvent",
     "ToolCallEndEvent",
+    "AgentToolCallEvent",
+    "AgentToolResultEvent",
+    "AgentTurnEndEvent",
     "DoneEvent",
     "ErrorEvent",
 ]

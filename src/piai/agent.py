@@ -19,12 +19,16 @@ from .mcp.hub import MCPHub
 from .mcp.server import MCPServer
 from .stream import stream
 from .types import (
+    AgentToolCallEvent,
+    AgentToolResultEvent,
+    AgentTurnEndEvent,
     AssistantMessage,
     Context,
     DoneEvent,
     ErrorEvent,
     StreamEvent,
     TextDeltaEvent,
+    ThinkingContent,
     ToolCall,
     ToolCallEndEvent,
     ToolResultMessage,
@@ -192,6 +196,16 @@ async def _run_loop(
         if done_event is None:
             raise RuntimeError("Stream ended without a done event")
 
+        # Collect thinking from this turn's message
+        turn_thinking = final_message.thinking if final_message else None
+
+        # Fire turn-end summary event (useful for observability dashboards)
+        await _fire_event(on_event, AgentTurnEndEvent(
+            turn=turn + 1,
+            thinking=turn_thinking,
+            tool_calls=list(tool_calls_made),
+        ))
+
         # No tool calls → model is done
         if not tool_calls_made:
             logger.debug("No tool calls — agent complete after %d turn(s)", turn + 1)
@@ -200,9 +214,25 @@ async def _run_loop(
         # Append assistant turn to context
         ctx.messages.append(final_message)
 
-        # Execute all tool calls and append results
+        # Execute all tool calls, firing observability events around each
         for tc in tool_calls_made:
+            await _fire_event(on_event, AgentToolCallEvent(
+                turn=turn + 1,
+                tool_name=tc.name,
+                tool_input=tc.input,
+            ))
+
             result = await _execute_tool(hub, tc, tool_result_max_chars)
+            is_error = result.startswith(("Tool not found:", f"Tool {tc.name!r} failed:"))
+
+            await _fire_event(on_event, AgentToolResultEvent(
+                turn=turn + 1,
+                tool_name=tc.name,
+                tool_input=tc.input,
+                result=result,
+                error=is_error,
+            ))
+
             ctx.messages.append(
                 ToolResultMessage(
                     tool_call_id=tc.id,
