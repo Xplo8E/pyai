@@ -36,20 +36,23 @@ That's it. piai will:
 
 ### stdio — local subprocess
 
-Spawns a process and communicates via stdin/stdout. Works with any MCP server that runs as a subprocess.
+Spawns a process and communicates via stdin/stdout. Works with any MCP server that runs as a subprocess. Uses `shlex.split` so paths with spaces are handled correctly.
 
 ```python
 # Simple command
 MCPServer.stdio("r2pm -r r2mcp")
 
-# Command with arguments already split
-MCPServer.stdio("npx @modelcontextprotocol/server-filesystem /tmp")
-
-# With custom env vars
-MCPServer.stdio("my-server", env={"API_KEY": "abc123"})
+# Path with spaces — handled correctly via shlex.split
+MCPServer.stdio('"/path with spaces/server" --flag')
 
 # With explicit name (used for namespacing on tool collisions)
 MCPServer.stdio("ida-mcp", name="ida")
+
+# Add env vars ON TOP of parent env (preserves PATH etc.)
+MCPServer.stdio("my-server", env_extra={"API_KEY": "secret"})
+
+# Replace env entirely (use carefully)
+MCPServer.stdio("my-server", env={"ONLY": "this"})
 ```
 
 ### http — Streamable HTTP (modern)
@@ -59,7 +62,10 @@ Connects to an MCP server over HTTP. The recommended transport for remote or lon
 ```python
 MCPServer.http("http://127.0.0.1:13337/mcp")
 MCPServer.http("http://127.0.0.1:13337/mcp", name="ida")
-MCPServer.http("https://my-server.example.com/mcp", headers={"Authorization": "Bearer token"})
+# bearer_token shorthand
+MCPServer.http("https://api.example.com/mcp", bearer_token="my-token")
+# explicit headers
+MCPServer.http("https://api.example.com/mcp", headers={"X-Api-Key": "abc"})
 ```
 
 ### sse — Server-Sent Events (legacy)
@@ -91,17 +97,46 @@ result = await agent(
 
 ### Tool name collisions
 
-If two servers expose a tool with the same name, the second one is prefixed with the server name:
+If two servers expose a tool with the same name, **both** are namespaced with their server name:
 
 ```
-server1 exposes: read_file       → registered as: read_file
-server2 exposes: read_file       → registered as: server2__read_file
+server1 exposes: read_file       → registered as: s1__read_file
+server2 exposes: read_file       → registered as: s2__read_file
 ```
 
-A warning is logged when this happens. You can set explicit names on servers to control the prefix:
+A warning is logged. The model sees both namespaced versions and picks the right one from context.
+Set explicit names to control the namespace prefix:
 
 ```python
-MCPServer.stdio("my-server", name="myserver")   # collision → myserver__tool_name
+MCPServer.stdio("r2pm -r r2mcp", name="r2")    # collision → r2__tool_name
+MCPServer.stdio("ida-mcp", name="ida")          # collision → ida__tool_name
+```
+
+### Loading servers from config files
+
+`MCPServer.from_config()` accepts the same dict format as Claude/Codex `config.toml`:
+
+```python
+# From TOML config (e.g. ~/.codex/config.toml mcp_servers section)
+import tomllib
+
+with open("~/.codex/config.toml", "rb") as f:
+    config = tomllib.load(f)
+
+servers = [
+    MCPServer.from_config({**cfg, "name": name})
+    for name, cfg in config.get("mcp_servers", {}).items()
+]
+
+result = await agent(model_id="gpt-5.1-codex-mini", context=ctx, mcp_servers=servers)
+```
+
+```python
+# Direct dict config
+MCPServer.from_config({"command": "ida-mcp", "name": "ida"})
+MCPServer.from_config({"url": "http://127.0.0.1:13337/mcp"})
+MCPServer.from_config({"command": "r2pm", "args": ["-r", "r2mcp"]})
+MCPServer.from_config({"url": "https://api.example.com/mcp", "bearer_token": "tok"})
 ```
 
 ---
@@ -110,16 +145,19 @@ MCPServer.stdio("my-server", name="myserver")   # collision → myserver__tool_n
 
 ```python
 result = await agent(
-    model_id="gpt-5.1-codex-mini",     # any supported model
-    context=ctx,                         # Context with messages + optional system_prompt
-    mcp_servers=[...],                   # list of MCPServer configs
-    options={                            # passed to piai stream()
-        "reasoning_effort": "medium",    # low / medium / high
-        "session_id": "my-session",      # optional session continuity
+    model_id="gpt-5.1-codex-mini",       # any supported model
+    context=ctx,                           # Context with messages + optional system_prompt
+    mcp_servers=[...],                     # list of MCPServer configs (or None for no MCP)
+    options={                              # passed to piai stream()
+        "reasoning_effort": "medium",      # low / medium / high
+        "session_id": "my-session",        # optional session continuity
     },
-    provider_id="openai-codex",          # default, don't need to set
-    max_turns=20,                        # safety limit on loop iterations (default: 20)
-    on_event=my_callback,                # optional: called for every StreamEvent
+    provider_id="openai-codex",            # default, don't need to set
+    max_turns=20,                          # safety limit on loop iterations (default: 20)
+    on_event=my_callback,                  # optional: sync or async callback for every StreamEvent
+    require_all_servers=False,             # if True, raise if any server fails to connect
+    connect_timeout=60.0,                  # per-server connection timeout in seconds
+    tool_result_max_chars=32_000,          # max chars per tool result (prevents context explosion)
 )
 ```
 
