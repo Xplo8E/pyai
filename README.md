@@ -313,14 +313,128 @@ If you've already logged in using the JS CLI (`npx @mariozechner/pi-ai login ope
 
 ---
 
+## MCP tool servers
+
+piai has a native MCP (Model Context Protocol) client. Pass any MCP server — radare2, IDA Pro, filesystem, web search, or any custom server — and the agent auto-discovers tools and runs the agentic loop for you.
+
+```python
+import asyncio
+from piai import agent
+from piai.mcp import MCPServer
+from piai.types import Context, UserMessage, TextDeltaEvent
+
+async def main():
+    ctx = Context(
+        system_prompt="You are an expert reverse engineer.",
+        messages=[UserMessage(content="Analyze /lib/target.so and report all JNI functions.")],
+    )
+
+    result = await agent(
+        model_id="gpt-5.1-codex-mini",
+        context=ctx,
+        mcp_servers=[
+            MCPServer.stdio("r2pm -r r2mcp"),             # radare2
+            MCPServer.stdio("ida-mcp", name="ida"),        # IDA Pro headless
+            MCPServer.http("http://127.0.0.1:13337/mcp"),  # IDA Pro HTTP server
+        ],
+        options={"reasoning_effort": "medium"},
+        max_turns=30,
+        on_event=lambda e: print(e.text, end="", flush=True) if isinstance(e, TextDeltaEvent) else None,
+    )
+
+asyncio.run(main())
+```
+
+**Transport types:**
+- `MCPServer.stdio("command --args")` — spawns a local subprocess
+- `MCPServer.http("http://host/mcp")` — Streamable HTTP (modern)
+- `MCPServer.sse("http://host/sse")` — legacy SSE transport
+
+**Auth shorthand:**
+```python
+MCPServer.http("https://api.example.com/mcp", bearer_token="my-token")
+MCPServer.stdio("my-server", env_extra={"API_KEY": "secret"})
+```
+
+**Load from a TOML config file:**
+
+Create `~/.piai/config.toml` (or any path you prefer):
+
+```toml
+[mcp_servers.r2]
+command = "r2pm"
+args = ["-r", "r2mcp"]
+
+[mcp_servers.ida]
+command = "ida-mcp"
+
+[mcp_servers.ida-http]
+url = "http://127.0.0.1:13337/mcp"
+
+[mcp_servers.remote]
+url = "https://api.example.com/mcp"
+bearer_token = "my-token"
+
+[mcp_servers.with-env]
+command = "my-server"
+
+[mcp_servers.with-env.env_extra]
+API_KEY = "secret"
+```
+
+Then load in one line:
+
+```python
+from piai.mcp import MCPServer
+
+servers = MCPServer.from_toml("~/.piai/config.toml")
+result = await agent(model_id="gpt-5.1-codex-mini", context=ctx, mcp_servers=servers)
+```
+
+See [docs/mcp.md](docs/mcp.md) for the full MCP reference.
+
+---
+
+## LangChain integration
+
+`PiAIChatModel` is a drop-in LangChain `BaseChatModel` backed by piai. Use it anywhere LangChain accepts a chat model — chains, agents, tools.
+
+```python
+from piai.langchain import PiAIChatModel
+from langchain_core.messages import HumanMessage
+
+llm = PiAIChatModel(model_name="gpt-5.1-codex-mini")
+
+# Invoke
+result = llm.invoke([HumanMessage(content="What is 2+2?")])
+print(result.content)
+
+# Stream
+async for chunk in llm.astream([HumanMessage(content="Tell me a joke")]):
+    print(chunk.content, end="", flush=True)
+
+# With tools (works with any LangChain agent or tool framework)
+llm_with_tools = llm.bind_tools([my_tool])
+result = llm_with_tools.invoke([HumanMessage(content="Use the tool")])
+```
+
+---
+
 ## Project structure
 
 ```
 src/piai/
-├── __init__.py              # Public API: stream, complete, complete_text + all types
+├── __init__.py              # Public API: stream, complete, complete_text, agent, MCPServer
 ├── types.py                 # Context, messages, stream events
 ├── stream.py                # Entry points with auth handling
+├── agent.py                 # Autonomous agentic loop with MCP support
 ├── cli.py                   # CLI commands
+├── mcp/
+│   ├── server.py            # MCPServer config (stdio/http/sse + from_toml)
+│   ├── client.py            # MCPClient — persistent session per server
+│   └── hub.py               # MCPHub — multi-server manager
+├── langchain/
+│   └── chat_model.py        # PiAIChatModel — LangChain BaseChatModel adapter
 ├── oauth/
 │   ├── pkce.py              # PKCE verifier/challenge (RFC 7636)
 │   ├── types.py             # OAuthCredentials, OAuthProviderInterface

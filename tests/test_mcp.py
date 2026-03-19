@@ -181,6 +181,125 @@ class TestMCPServer:
         assert _basename("/usr/local/bin/ida-mcp") == "ida-mcp"
         assert _basename("C:\\Programs\\server.exe") == "server.exe"
 
+    def test_from_toml_stdio(self, tmp_path):
+        toml_content = b"""
+[mcp_servers.r2]
+command = "r2pm"
+args = ["-r", "r2mcp"]
+
+[mcp_servers.ida]
+command = "ida-mcp"
+"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_bytes(toml_content)
+
+        servers = MCPServer.from_toml(str(config_file))
+        assert len(servers) == 2
+        names = {s.name for s in servers}
+        assert names == {"r2", "ida"}
+
+        r2 = next(s for s in servers if s.name == "r2")
+        assert r2.transport == "stdio"
+        assert r2.command == "r2pm"
+        assert r2.args == ["-r", "r2mcp"]
+
+    def test_from_toml_http(self, tmp_path):
+        toml_content = b"""
+[mcp_servers.ida-pro]
+url = "http://127.0.0.1:13337/mcp"
+
+[mcp_servers.remote]
+url = "https://api.example.com/mcp"
+bearer_token = "my-token"
+"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_bytes(toml_content)
+
+        servers = MCPServer.from_toml(str(config_file))
+        assert len(servers) == 2
+
+        remote = next(s for s in servers if s.name == "remote")
+        assert remote.transport == "http"
+        assert remote.headers["Authorization"] == "Bearer my-token"
+
+    def test_from_toml_mixed(self, tmp_path):
+        toml_content = b"""
+[mcp_servers.r2]
+command = "r2pm"
+args = ["-r", "r2mcp"]
+
+[mcp_servers.ida-http]
+url = "http://127.0.0.1:13337/mcp"
+
+[mcp_servers.legacy]
+url = "http://localhost:9000/sse"
+"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_bytes(toml_content)
+
+        servers = MCPServer.from_toml(str(config_file))
+        assert len(servers) == 3
+        transports = {s.name: s.transport for s in servers}
+        assert transports["r2"] == "stdio"
+        assert transports["ida-http"] == "http"
+        assert transports["legacy"] == "sse"
+
+    def test_from_toml_env_extra(self, tmp_path):
+        toml_content = b"""
+[mcp_servers.my-server]
+command = "my-server"
+
+[mcp_servers.my-server.env_extra]
+API_KEY = "secret"
+"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_bytes(toml_content)
+
+        servers = MCPServer.from_toml(str(config_file))
+        assert len(servers) == 1
+        assert servers[0].env is not None
+        assert servers[0].env["API_KEY"] == "secret"
+
+    def test_from_toml_custom_section(self, tmp_path):
+        toml_content = b"""
+[tools.r2]
+command = "r2pm"
+args = ["-r", "r2mcp"]
+"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_bytes(toml_content)
+
+        servers = MCPServer.from_toml(str(config_file), section="tools")
+        assert len(servers) == 1
+        assert servers[0].name == "r2"
+
+    def test_from_toml_empty_section_returns_empty(self, tmp_path):
+        toml_content = b"""
+[other_section]
+key = "value"
+"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_bytes(toml_content)
+
+        servers = MCPServer.from_toml(str(config_file))
+        assert servers == []
+
+    def test_from_toml_file_not_found(self):
+        with pytest.raises(FileNotFoundError):
+            MCPServer.from_toml("/nonexistent/path/config.toml")
+
+    def test_from_toml_name_from_key(self, tmp_path):
+        toml_content = b"""
+[mcp_servers.my-custom-name]
+command = "server"
+"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_bytes(toml_content)
+
+        servers = MCPServer.from_toml(str(config_file))
+        # Name comes from TOML key, not command basename
+        assert servers[0].name == "my-custom-name"
+
 
 # ------------------------------------------------------------------ #
 # MCPHub unit tests (mocked clients)                                  #

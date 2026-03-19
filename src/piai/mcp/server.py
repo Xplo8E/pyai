@@ -251,6 +251,70 @@ class MCPServer:
         else:
             raise ValueError(f"Unknown transport: {transport!r}. Must be 'stdio', 'http', or 'sse'.")
 
+    @classmethod
+    def from_toml(cls, path: str, section: str = "mcp_servers") -> "list[MCPServer]":
+        """
+        Load MCP servers from a piai TOML config file.
+
+        The TOML format uses a [mcp_servers] table where each key is the
+        server name and the value is the server config:
+
+            [mcp_servers.r2]
+            command = "r2pm"
+            args = ["-r", "r2mcp"]
+
+            [mcp_servers.ida]
+            command = "ida-mcp"
+
+            [mcp_servers.my-http-server]
+            url = "http://127.0.0.1:13337/mcp"
+
+            [mcp_servers.remote]
+            url = "https://api.example.com/mcp"
+            bearer_token = "my-token"
+
+            [mcp_servers.with-env]
+            command = "my-server"
+            env_extra = { API_KEY = "secret" }
+
+        Args:
+            path:    Path to the TOML file. e.g. "~/.piai/config.toml"
+            section: Top-level key containing server configs. Default: "mcp_servers"
+
+        Returns:
+            List of MCPServer instances, one per entry under [section].
+
+        Raises:
+            FileNotFoundError: If the file doesn't exist.
+            ValueError:        If a server config is invalid.
+
+        Example:
+            servers = MCPServer.from_toml("~/.piai/config.toml")
+            result = await agent(model_id="gpt-5.1-codex-mini", context=ctx, mcp_servers=servers)
+        """
+        import tomllib
+        from pathlib import Path
+
+        resolved = Path(path).expanduser()
+        if not resolved.exists():
+            raise FileNotFoundError(f"piai config not found: {resolved}")
+
+        with open(resolved, "rb") as f:
+            data = tomllib.load(f)
+
+        servers_cfg = data.get(section, {})
+        if not servers_cfg:
+            return []
+
+        servers = []
+        for name, cfg in servers_cfg.items():
+            if not isinstance(cfg, dict):
+                continue
+            # Inject name from the TOML key if not explicitly set
+            cfg_with_name = {"name": name, **cfg}
+            servers.append(cls.from_config(cfg_with_name))
+        return servers
+
     def __repr__(self) -> str:
         if self.transport == "stdio":
             cmd = " ".join([self.command or ""] + self.args)
