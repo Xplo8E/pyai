@@ -14,8 +14,20 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 
 import click
+
+# Suppress the noisy threading traceback that Python prints when a daemon
+# thread is still alive during interpreter shutdown (e.g. after Ctrl+C).
+_original_excepthook = threading.excepthook
+
+def _quiet_threading_excepthook(args):
+    if args.exc_type is KeyboardInterrupt:
+        return
+    _original_excepthook(args)
+
+threading.excepthook = _quiet_threading_excepthook
 
 from .oauth import get_oauth_provider, get_oauth_providers
 from .oauth.storage import delete_credentials, get_provider_credentials, save_credentials

@@ -187,6 +187,10 @@ class _CallbackServer:
         self._code_event.wait(timeout=timeout)
         return self._received_code
 
+    def cancel(self):
+        """Unblock wait_for_code without a code (used on Ctrl+C)."""
+        self._code_event.set()
+
     def close(self):
         if self._server:
             self._server.shutdown()
@@ -422,6 +426,7 @@ async def login_openai_codex(
         return _build_credentials(token_data)
 
     finally:
+        server.cancel()  # unblock wait_for_code if still waiting
         server.close()
 
 
