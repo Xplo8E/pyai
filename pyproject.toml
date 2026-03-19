@@ -1,0 +1,36 @@
+[project]
+name = "pyai"
+version = "0.1.0"
+description = "Python port of @mariozechner/pi-ai — unified LLM API with ChatGPT Plus OAuth"
+readme = "README.md"
+authors = [
+    { name = "Xplo8E", email = "rvkyadav71@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "click>=8.0",
+    "websockets>=12.0",
+]
+
+[project.scripts]
+pyai = "pyai.cli:cli"
+
+[build-system]
+requires = ["uv_build>=0.8.14,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+package = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
