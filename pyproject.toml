@@ -62,6 +62,7 @@ langgraph = [
 
 [dependency-groups]
 dev = [
+    "langchain>=1.2.12",
     "langchain-core>=1.2.20",
     "langgraph>=1.0",
     "langgraph-supervisor>=0.0.31",

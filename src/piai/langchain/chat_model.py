@@ -156,6 +156,31 @@ class PiAIChatModel(BaseChatModel):
     # Sync interface (runs async in a new event loop)                     #
     # ------------------------------------------------------------------ #
 
+    def _run_async(self, coro: Any) -> Any:
+        """
+        Run an async coroutine from a sync context, safely handling the case
+        where an event loop is already running (e.g. inside LangGraph).
+
+        LangGraph runs its graph execution inside an async event loop, so
+        asyncio.run() fails with 'cannot be called from a running event loop'.
+        In that case we dispatch to a thread with its own fresh event loop.
+        """
+        import concurrent.futures
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            # Already inside an event loop (LangGraph, Jupyter, etc.)
+            # Run in a thread with its own event loop.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, coro)
+                return future.result()
+        else:
+            return asyncio.run(coro)
+
     def _generate(
         self,
         messages: list[BaseMessage],
@@ -163,7 +188,7 @@ class PiAIChatModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        return asyncio.run(self._agenerate(messages, stop=stop, **kwargs))
+        return self._run_async(self._agenerate(messages, stop=stop, **kwargs))
 
     def _stream(
         self,
@@ -178,7 +203,7 @@ class PiAIChatModel(BaseChatModel):
                 chunks.append(chunk)
             return chunks
 
-        for chunk in asyncio.run(_collect()):
+        for chunk in self._run_async(_collect()):
             yield chunk
 
     # ------------------------------------------------------------------ #

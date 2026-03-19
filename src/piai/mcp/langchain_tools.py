@@ -98,8 +98,20 @@ class MCPLangChainTool(BaseTool):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _run(self, **kwargs: Any) -> str:
-        """Sync run — runs async call in a new event loop."""
-        return asyncio.get_event_loop().run_until_complete(self._arun(**kwargs))
+        """Sync run — safely handles running event loop (e.g. inside LangGraph threads)."""
+        import concurrent.futures
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, self._arun(**kwargs))
+                return future.result()
+        else:
+            return asyncio.run(self._arun(**kwargs))
 
     async def _arun(self, **kwargs: Any) -> str:
         """Async run — calls the MCP tool via the hub."""
