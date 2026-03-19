@@ -33,13 +33,13 @@ uv sync
 ### As a dependency in your project
 
 ```bash
-uv add git+https://github.com/Xplo8E/piai
+uv add pi-ai-py
 ```
 
 Or with pip:
 
 ```bash
-pip install piai
+pip install pi-ai-py
 ```
 
 ---

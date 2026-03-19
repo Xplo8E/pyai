@@ -1,10 +1,21 @@
 [project]
-name = "piai"
+name = "pi-ai-py"
 version = "0.1.0"
-description = "Python port of @mariozechner/pi-ai — unified LLM API with ChatGPT Plus OAuth"
+description = "Python port of @mariozechner/pi-ai — unified LLM streaming API with OAuth authentication"
 readme = "README.md"
+license = { text = "MIT" }
 authors = [
     { name = "Xplo8E", email = "rvkyadav71@gmail.com" }
+]
+keywords = ["openai", "chatgpt", "gpt", "llm", "oauth", "streaming", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 requires-python = ">=3.12"
 dependencies = [
@@ -12,6 +23,11 @@ dependencies = [
     "click>=8.0",
     "websockets>=12.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Xplo8E/piai"
+Repository = "https://github.com/Xplo8E/piai"
+"Bug Tracker" = "https://github.com/Xplo8E/piai/issues"
 
 [project.scripts]
 piai = "piai.cli:cli"
@@ -22,6 +38,9 @@ build-backend = "uv_build"
 
 [tool.uv]
 package = true
+
+[tool.uv.build-backend]
+module-name = "piai"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
