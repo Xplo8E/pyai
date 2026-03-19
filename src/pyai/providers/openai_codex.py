@@ -5,7 +5,8 @@ Hits https://chatgpt.com/backend-api/codex/responses with SSE streaming.
 This is NOT the public OpenAI API — it's the internal ChatGPT backend
 that your Plus/Pro subscription grants access to.
 
-Mirrors src/providers/openai-codex-responses.ts.
+Mirrors src/providers/openai-codex-responses.ts +
+        src/providers/openai-responses-shared.ts processResponsesStream().
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import platform
+import re
 import time
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -40,17 +42,20 @@ from ..types import (
 from .message_transform import build_request_body
 
 # ------------------------------------------------------------------ #
-# Constants — must match JS headers exactly                           #
+# Constants                                                           #
 # ------------------------------------------------------------------ #
 
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 CODEX_PATH = "/codex/responses"
-JWT_CLAIM_PATH = "https://api.openai.com/auth"
 
 MAX_RETRIES = 3
 BASE_DELAY_S = 1.0
 
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+_RETRYABLE_PATTERN = re.compile(
+    r"rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused",
+    re.IGNORECASE,
+)
 
 
 # ------------------------------------------------------------------ #
@@ -127,7 +132,7 @@ async def _parse_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any],
     """
     Parse Server-Sent Events from an httpx streaming response.
 
-    Event boundary: double newline (\n\n).
+    Event boundary: double newline (\\n\\n).
     Data lines start with "data:".
     "[DONE]" sentinel is skipped.
 
@@ -155,7 +160,7 @@ async def _parse_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any],
 
 
 # ------------------------------------------------------------------ #
-# Event → StreamEvent conversion                                      #
+# Stream processor                                                    #
 # ------------------------------------------------------------------ #
 
 
@@ -163,161 +168,317 @@ class _StreamProcessor:
     """
     Convert raw Codex SSE events into typed StreamEvents.
 
-    Tracks in-progress tool calls and text accumulation to emit
-    complete events at the right boundaries.
+    Faithful port of processResponsesStream() from openai-responses-shared.ts.
 
-    Mirrors processResponsesStream() from openai-responses-shared.ts.
+    Uses the same currentItem / currentBlock state machine as JS:
+    - current_item tracks the active output item (reasoning | message | function_call)
+    - current_block tracks the in-progress content block being built
+
+    Key invariants from JS:
+    - reasoning_summary_text.delta only updates if there is an active summary part
+    - reasoning_summary_part.done appends "\\n\\n" separator to the thinking text
+    - output_text.delta only updates if current_item.content is non-empty and
+      last part is output_text (guards against refusal parts coming first)
+    - refusal.delta surfaces to caller as TextDeltaEvent (same as text)
+    - output_item.done finalises each block and clears current_block
+    - usage: cached tokens are subtracted from input_tokens (JS line 437-438)
     """
 
     def __init__(self, output: AssistantMessage):
         self._output = output
-        self._current_text = ""
-        self._in_text = False
-        self._current_thinking = ""
-        self._in_thinking = False
-        # tool call id → {name, args_buffer}
-        self._tool_calls: dict[str, dict[str, Any]] = {}
-        self._tool_call_order: list[str] = []  # preserve insertion order
+        # current_item mirrors JS currentItem — tracks active output item metadata
+        self._current_item: dict[str, Any] | None = None
+        # current_block mirrors JS currentBlock — tracks in-progress content block
+        # For reasoning: {"type": "thinking", "thinking": "", "summary_parts": []}
+        # For text:      {"type": "text", "text": "", "content_parts": []}
+        # For tool call: {"type": "function_call", "call_id": str, "item_id": str,
+        #                 "name": str, "args": str}
+        self._current_block: dict[str, Any] | None = None
 
     async def process(
         self, events: AsyncGenerator[dict[str, Any], None]
     ) -> AsyncGenerator[StreamEvent, None]:
-        async for event in events:
-            event_type = event.get("type", "")
 
-            if event_type == "error":
+        async for event in events:
+            t = event.get("type", "")
+
+            # -------------------------------------------------------- #
+            # Error events — raise immediately                         #
+            # -------------------------------------------------------- #
+
+            if t == "error":
                 code = event.get("code", "")
                 message = event.get("message", "")
                 raise RuntimeError(f"Codex error: {message or code or json.dumps(event)}")
 
-            if event_type == "response.failed":
-                msg = (event.get("response") or {}).get("error", {}).get("message")
-                raise RuntimeError(msg or "Codex response failed")
+            if t == "response.failed":
+                # Fix 4: include incomplete_details.reason as fallback
+                # Mirrors JS lines 449-453 of openai-responses-shared.ts
+                response_data = event.get("response") or {}
+                err = response_data.get("error") or {}
+                details = response_data.get("incomplete_details") or {}
+                if err:
+                    msg = f"{err.get('code', 'unknown')}: {err.get('message', 'no message')}"
+                elif details.get("reason"):
+                    msg = f"incomplete: {details['reason']}"
+                else:
+                    msg = "Unknown error (no error details in response)"
+                raise RuntimeError(msg)
 
-            # --- Text events ---
-            if event_type == "response.output_text.delta":
-                delta = event.get("delta", "")
-                if delta:
-                    if not self._in_text:
-                        self._in_text = True
-                        self._current_text = ""
-                        yield TextStartEvent()
-                    self._current_text += delta
+            # -------------------------------------------------------- #
+            # output_item.added — initialize new block                 #
+            # Mirrors JS lines 286-309                                 #
+            # -------------------------------------------------------- #
+
+            elif t == "response.output_item.added":
+                item = event.get("item") or {}
+                item_type = item.get("type", "")
+
+                if item_type == "reasoning":
+                    self._current_item = {"type": "reasoning", "summary": []}
+                    self._current_block = {"type": "thinking", "thinking": "", "summary_parts": []}
+                    # Don't append to output.content yet — done on output_item.done
+
+                elif item_type == "message":
+                    self._current_item = {"type": "message", "id": item.get("id", ""), "content": []}
+                    self._current_block = {"type": "text", "text": "", "content_parts": []}
+                    yield TextStartEvent()
+
+                elif item_type == "function_call":
+                    call_id = item.get("call_id", "")
+                    item_id = item.get("id", "")
+                    name = item.get("name", "")
+                    self._current_item = {
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "id": item_id,
+                        "name": name,
+                        "arguments": item.get("arguments", ""),
+                    }
+                    self._current_block = {
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "item_id": item_id,
+                        "name": name,
+                        "args": item.get("arguments", ""),
+                    }
+                    tc = ToolCall(id=f"{call_id}|{item_id}", name=name)
+                    yield ToolCallStartEvent(tool_call=tc)
+
+            # -------------------------------------------------------- #
+            # Reasoning events                                          #
+            # Mirrors JS lines 310-344                                 #
+            # -------------------------------------------------------- #
+
+            elif t == "response.reasoning_summary_part.added":
+                # Initialize a new summary part on the current reasoning item
+                if self._current_item and self._current_item.get("type") == "reasoning":
+                    part = event.get("part") or {}
+                    self._current_item["summary"].append({"type": part.get("type", "summary_text"), "text": ""})
+
+            elif t == "response.reasoning_summary_text.delta":
+                # Only update if there is an active last summary part (mirrors JS guard)
+                if (
+                    self._current_item
+                    and self._current_item.get("type") == "reasoning"
+                    and self._current_block
+                    and self._current_block.get("type") == "thinking"
+                ):
+                    summary = self._current_item["summary"]
+                    if summary:
+                        delta = event.get("delta", "")
+                        summary[-1]["text"] += delta
+                        self._current_block["thinking"] += delta
+                        yield ThinkingDeltaEvent(thinking=delta)
+
+            elif t == "response.reasoning_summary_part.done":
+                # Append "\n\n" separator between multi-part reasoning blocks
+                # Mirrors JS lines 330-344
+                if (
+                    self._current_item
+                    and self._current_item.get("type") == "reasoning"
+                    and self._current_block
+                    and self._current_block.get("type") == "thinking"
+                ):
+                    summary = self._current_item["summary"]
+                    if summary:
+                        separator = "\n\n"
+                        summary[-1]["text"] += separator
+                        self._current_block["thinking"] += separator
+                        yield ThinkingDeltaEvent(thinking=separator)
+
+            # -------------------------------------------------------- #
+            # Text/refusal events                                       #
+            # Mirrors JS lines 345-385                                 #
+            # -------------------------------------------------------- #
+
+            elif t == "response.content_part.added":
+                # Track content parts on the current message item
+                # Only accept output_text and refusal — filter ReasoningText
+                if self._current_item and self._current_item.get("type") == "message":
+                    part = event.get("part") or {}
+                    part_type = part.get("type", "")
+                    if part_type in ("output_text", "refusal"):
+                        self._current_item["content"].append({"type": part_type, "text": ""})
+
+            elif t == "response.output_text.delta":
+                # Guard: only emit if content is non-empty and last part is output_text
+                # Mirrors JS lines 353-368
+                if (
+                    self._current_item
+                    and self._current_item.get("type") == "message"
+                    and self._current_block
+                    and self._current_block.get("type") == "text"
+                    and self._current_item["content"]
+                    and self._current_item["content"][-1]["type"] == "output_text"
+                ):
+                    delta = event.get("delta", "")
+                    self._current_item["content"][-1]["text"] += delta
+                    self._current_block["text"] += delta
                     yield TextDeltaEvent(text=delta)
 
-            elif event_type == "response.output_text.done":
-                if self._in_text:
-                    self._in_text = False
-                    text_block = TextContent(text=self._current_text)
-                    self._output.content.append(text_block)
-                    yield TextEndEvent(text=self._current_text)
-                    self._current_text = ""
+            elif t == "response.refusal.delta":
+                # Refusals surface to caller as text (same behaviour as JS lines 370-385)
+                if (
+                    self._current_item
+                    and self._current_item.get("type") == "message"
+                    and self._current_block
+                    and self._current_block.get("type") == "text"
+                    and self._current_item["content"]
+                    and self._current_item["content"][-1]["type"] == "refusal"
+                ):
+                    delta = event.get("delta", "")
+                    self._current_item["content"][-1]["text"] += delta
+                    self._current_block["text"] += delta
+                    yield TextDeltaEvent(text=delta)
 
-            # --- Reasoning/thinking events ---
-            elif event_type == "response.reasoning_summary_text.delta":
-                delta = event.get("delta", "")
-                if delta:
-                    self._current_thinking += delta
-                    yield ThinkingDeltaEvent(thinking=delta)
+            # -------------------------------------------------------- #
+            # Tool call argument events                                 #
+            # Mirrors JS lines 386-401                                 #
+            # -------------------------------------------------------- #
 
-            elif event_type == "response.reasoning_summary_text.done":
-                if self._current_thinking:
-                    thinking_block = ThinkingContent(thinking=self._current_thinking)
-                    self._output.content.append(thinking_block)
-                    self._current_thinking = ""
+            elif t == "response.function_call_arguments.delta":
+                if (
+                    self._current_item
+                    and self._current_item.get("type") == "function_call"
+                    and self._current_block
+                    and self._current_block.get("type") == "function_call"
+                ):
+                    delta = event.get("delta", "")
+                    self._current_block["args"] += delta
+                    self._current_item["arguments"] += delta
+                    call_id = self._current_block["call_id"]
+                    item_id = self._current_block["item_id"]
+                    yield ToolCallDeltaEvent(id=f"{call_id}|{item_id}", json_delta=delta)
 
-            # --- Tool call events ---
-            elif event_type == "response.output_item.added":
+            elif t == "response.function_call_arguments.done":
+                if (
+                    self._current_item
+                    and self._current_item.get("type") == "function_call"
+                    and self._current_block
+                    and self._current_block.get("type") == "function_call"
+                ):
+                    # Use the done event's arguments as the canonical final value
+                    self._current_block["args"] = event.get("arguments", self._current_block["args"])
+                    self._current_item["arguments"] = self._current_block["args"]
+
+            # -------------------------------------------------------- #
+            # output_item.done — finalize block                        #
+            # Mirrors JS lines 402-433                                 #
+            # -------------------------------------------------------- #
+
+            elif t == "response.output_item.done":
                 item = event.get("item") or {}
-                if item.get("type") == "function_call":
-                    call_id = item.get("call_id", item.get("id", ""))
-                    name = item.get("name", "")
-                    if call_id and call_id not in self._tool_calls:
-                        self._tool_calls[call_id] = {"name": name, "args": ""}
-                        self._tool_call_order.append(call_id)
-                        tc = ToolCall(id=call_id, name=name)
-                        yield ToolCallStartEvent(tool_call=tc)
+                item_type = item.get("type", "")
 
-            elif event_type == "response.function_call_arguments.delta":
-                call_id = event.get("call_id", event.get("item_id", ""))
-                delta = event.get("delta", "")
-                if call_id in self._tool_calls and delta:
-                    self._tool_calls[call_id]["args"] += delta
-                    yield ToolCallDeltaEvent(id=call_id, json_delta=delta)
+                if item_type == "reasoning" and self._current_block and self._current_block.get("type") == "thinking":
+                    # Reconstruct thinking from summary parts (authoritative on done)
+                    summary_parts = self._current_item.get("summary", []) if self._current_item else []
+                    thinking_text = "\n\n".join(p["text"] for p in summary_parts)
+                    thinking_block = ThinkingContent(thinking=thinking_text)
+                    self._output.content.append(thinking_block)
+                    yield ThinkingDeltaEvent(thinking="")  # signal end to any listener
+                    self._current_block = None
 
-            elif event_type == "response.function_call_arguments.done":
-                call_id = event.get("call_id", event.get("item_id", ""))
-                if call_id in self._tool_calls:
-                    entry = self._tool_calls[call_id]
+                elif item_type == "message" and self._current_block and self._current_block.get("type") == "text":
+                    # Join all content parts into final text
+                    content_parts = self._current_item.get("content", []) if self._current_item else []
+                    final_text = "".join(p["text"] for p in content_parts)
+                    text_block = TextContent(text=final_text)
+                    self._output.content.append(text_block)
+                    yield TextEndEvent(text=final_text)
+                    self._current_block = None
+
+                elif item_type == "function_call":
+                    # Use final arguments from the done item (authoritative)
+                    args_str = item.get("arguments", "")
+                    if not args_str and self._current_block and self._current_block.get("type") == "function_call":
+                        args_str = self._current_block["args"]
                     try:
-                        input_dict = json.loads(entry["args"]) if entry["args"] else {}
+                        input_dict = json.loads(args_str) if args_str else {}
                     except json.JSONDecodeError:
                         input_dict = {}
-                    tc = ToolCall(id=call_id, name=entry["name"], input=input_dict)
-                    yield ToolCallEndEvent(tool_call=tc)
 
-            # --- Completion event ---
-            elif event_type in ("response.completed", "response.done"):
+                    call_id = item.get("call_id", "")
+                    item_id = item.get("id", "")
+                    name = item.get("name", "")
+                    if not call_id and self._current_block and self._current_block.get("type") == "function_call":
+                        call_id = self._current_block["call_id"]
+                        item_id = self._current_block["item_id"]
+                        name = self._current_block["name"]
+
+                    tc = ToolCall(id=f"{call_id}|{item_id}", name=name, input=input_dict)
+                    self._output.content.append(ToolCallContent(tool_calls=[tc]))
+                    yield ToolCallEndEvent(tool_call=tc)
+                    self._current_block = None
+
+            # -------------------------------------------------------- #
+            # Completion event — extract usage + stop reason           #
+            # Mirrors JS lines 434-447 of openai-responses-shared.ts  #
+            # -------------------------------------------------------- #
+
+            elif t == "response.completed":
                 response_data = event.get("response") or {}
                 self._consume_final_response(response_data)
 
-            # --- Output item done (finalize tool calls) ---
-            elif event_type == "response.output_item.done":
-                item = event.get("item") or {}
-                if item.get("type") == "function_call":
-                    call_id = item.get("call_id", item.get("id", ""))
-                    if call_id in self._tool_calls:
-                        entry = self._tool_calls[call_id]
-                        try:
-                            args_str = item.get("arguments", entry["args"])
-                            input_dict = json.loads(args_str) if args_str else {}
-                        except json.JSONDecodeError:
-                            input_dict = {}
-                        entry["name"] = item.get("name", entry["name"])
-                        entry["input"] = input_dict
-
-        # Finalize any pending tool calls into content
-        if self._tool_call_order:
-            tool_calls = []
-            for call_id in self._tool_call_order:
-                entry = self._tool_calls[call_id]
-                tool_calls.append(ToolCall(
-                    id=call_id,
-                    name=entry["name"],
-                    input=entry.get("input", {}),
-                ))
-            self._output.content.append(ToolCallContent(tool_calls=tool_calls))
-            self._output.stop_reason = "tool_use"
-
     def _consume_final_response(self, response_data: dict[str, Any]) -> None:
-        """Extract usage stats and stop reason from the completed response."""
+        """
+        Extract usage and stop reason from the completed response.
+
+        Critical: JS subtracts cached_tokens from input_tokens because the API
+        includes cached tokens in input_tokens total (lines 437-440 of shared.ts).
+        """
         usage = response_data.get("usage") or {}
-        self._output.usage["input"] = usage.get("input_tokens", 0)
+        cached = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+        input_tokens = usage.get("input_tokens", 0)
+
+        self._output.usage["input"] = input_tokens - cached  # non-cached input only
         self._output.usage["output"] = usage.get("output_tokens", 0)
-        self._output.usage["cache_read"] = usage.get("input_tokens_details", {}).get("cached_tokens", 0)
+        self._output.usage["cache_read"] = cached
+        self._output.usage["total_tokens"] = usage.get("total_tokens", 0)
 
         status = response_data.get("status", "")
+        has_tool_calls = any(isinstance(b, ToolCallContent) for b in self._output.content)
+
         if status == "incomplete":
             self._output.stop_reason = "length"
         elif status in ("failed", "cancelled"):
             self._output.stop_reason = "error"
-        elif self._output.stop_reason != "tool_use":
+        elif has_tool_calls:
+            self._output.stop_reason = "tool_use"
+        else:
             self._output.stop_reason = "stop"
 
 
 # ------------------------------------------------------------------ #
-# Error detection                                                     #
+# Error helpers                                                       #
 # ------------------------------------------------------------------ #
 
 
 def _is_retryable(status: int, body: str) -> bool:
     if status in _RETRYABLE_STATUSES:
         return True
-    import re
-    return bool(re.search(
-        r"rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused",
-        body, re.IGNORECASE
-    ))
+    return bool(_RETRYABLE_PATTERN.search(body))
 
 
 def _friendly_error(status: int, body: str) -> str:
@@ -325,7 +486,6 @@ def _friendly_error(status: int, body: str) -> str:
         data = json.loads(body)
         err = data.get("error") or {}
         code = err.get("code", "") or err.get("type", "")
-        import re
         if re.search(r"usage_limit_reached|usage_not_included|rate_limit_exceeded", code, re.IGNORECASE) or status == 429:
             plan = f" ({err['plan_type'].lower()} plan)" if err.get("plan_type") else ""
             resets_at = err.get("resets_at")
@@ -357,7 +517,7 @@ async def stream_openai_codex(
     """
     Stream completions from ChatGPT backend.
 
-    Yields typed StreamEvent objects (TextDeltaEvent, ToolCallStartEvent, DoneEvent, etc.).
+    Yields typed StreamEvent objects.
     Handles retries for rate limits and transient errors.
 
     Mirrors streamOpenAICodexResponses() from openai-codex-responses.ts.
@@ -384,21 +544,14 @@ async def stream_openai_codex(
     for attempt in range(MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-                async with client.stream(
-                    "POST", url, json=body, headers=headers
-                ) as response:
+                async with client.stream("POST", url, json=body, headers=headers) as response:
                     if response.is_success:
                         processor = _StreamProcessor(output)
                         async for event in processor.process(_parse_sse(response)):
                             yield event
-
-                        yield DoneEvent(
-                            reason=output.stop_reason,
-                            message=output,
-                        )
+                        yield DoneEvent(reason=output.stop_reason, message=output)
                         return
 
-                    # Not OK — read body for error detail
                     await response.aread()
                     error_body = response.text
                     if attempt < MAX_RETRIES and _is_retryable(response.status_code, error_body):
@@ -409,7 +562,9 @@ async def stream_openai_codex(
 
         except (httpx.NetworkError, httpx.TimeoutException) as e:
             last_error = e
-            if attempt < MAX_RETRIES:
+            # Fix 2: don't retry if the error message is about usage limits
+            # Mirrors JS line 227: !lastError.message.includes("usage limit")
+            if attempt < MAX_RETRIES and "usage limit" not in str(e).lower():
                 await asyncio.sleep(BASE_DELAY_S * (2 ** attempt))
                 continue
             break

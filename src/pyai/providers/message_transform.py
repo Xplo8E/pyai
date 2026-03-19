@@ -145,6 +145,24 @@ def _convert_tool(tool: Tool) -> dict[str, Any]:
 # ------------------------------------------------------------------ #
 
 
+def _clamp_reasoning_effort(model_id: str, effort: str) -> str:
+    """
+    Clamp reasoning effort to values the model actually supports.
+
+    Mirrors clampReasoningEffort() from openai-codex-responses.ts (lines 328-335).
+    """
+    # Strip provider prefix e.g. "openai-codex/gpt-5.1" → "gpt-5.1"
+    mid = model_id.split("/")[-1] if "/" in model_id else model_id
+
+    if (mid.startswith("gpt-5.2") or mid.startswith("gpt-5.3") or mid.startswith("gpt-5.4")) and effort == "minimal":
+        return "low"
+    if mid == "gpt-5.1" and effort == "xhigh":
+        return "high"
+    if mid == "gpt-5.1-codex-mini":
+        return "high" if effort in ("high", "xhigh") else "medium"
+    return effort
+
+
 def build_request_body(
     model_id: str,
     context: Context,
@@ -183,7 +201,7 @@ def build_request_body(
     reasoning_effort = opts.get("reasoning_effort")
     if reasoning_effort:
         body["reasoning"] = {
-            "effort": reasoning_effort,
+            "effort": _clamp_reasoning_effort(model_id, reasoning_effort),
             "summary": opts.get("reasoning_summary", "auto"),
         }
 
