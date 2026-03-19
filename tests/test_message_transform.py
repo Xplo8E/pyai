@@ -73,9 +73,9 @@ def test_system_prompt_in_request_body():
         system_prompt="You are helpful.",
         messages=[UserMessage(content="Hi")],
     )
-    body = build_request_body("gpt-4o", ctx)
+    body = build_request_body("gpt-5.1-codex-mini", ctx)
     assert body["instructions"] == "You are helpful."
-    assert body["model"] == "gpt-4o"
+    assert body["model"] == "gpt-5.1-codex-mini"
     assert body["stream"] is True
     assert body["store"] is False
 
@@ -87,7 +87,7 @@ def test_tools_converted():
         parameters={"type": "object", "properties": {"query": {"type": "string"}}},
     )
     ctx = Context(messages=[UserMessage(content="Search for X")], tools=[tool])
-    body = build_request_body("gpt-4o", ctx)
+    body = build_request_body("gpt-5.1-codex-mini", ctx)
     assert "tools" in body
     assert body["tools"][0]["name"] == "search"
     assert body["tools"][0]["type"] == "function"
@@ -95,12 +95,12 @@ def test_tools_converted():
 
 def test_session_id_becomes_prompt_cache_key():
     ctx = Context(messages=[UserMessage(content="Hi")])
-    body = build_request_body("gpt-4o", ctx, options={"session_id": "sess_abc"})
+    body = build_request_body("gpt-5.1-codex-mini", ctx, options={"session_id": "sess_abc"})
     assert body["prompt_cache_key"] == "sess_abc"
 
 
 def test_reasoning_effort_in_body():
     ctx = Context(messages=[UserMessage(content="Hi")])
-    body = build_request_body("gpt-4o", ctx, options={"reasoning_effort": "high"})
+    body = build_request_body("gpt-5.1-codex-mini", ctx, options={"reasoning_effort": "high"})
     assert body["reasoning"]["effort"] == "high"
     assert body["reasoning"]["summary"] == "auto"

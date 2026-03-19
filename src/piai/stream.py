@@ -29,7 +29,7 @@ async def stream(
     and persists updated credentials back.
 
     Args:
-        model_id:    e.g. "gpt-4o", "gpt-4o-mini", "o3", "gpt-5.1-codex-mini"
+        model_id:    e.g. "gpt-5.1-codex-mini", "gpt-5.1", "gpt-5.2", "gpt-5.3-codex"
         context:     Conversation context (messages + optional system_prompt + tools)
         options:     Provider-specific options (session_id, reasoning_effort, etc.)
         provider_id: Defaults to "openai-codex" (ChatGPT Plus)

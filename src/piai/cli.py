@@ -171,7 +171,7 @@ def run(prompt: str, model: str, system: str | None, provider: str):
 
     Example:
         piai run "What is 2+2?"
-        piai run "Explain async/await in Python" --model gpt-4o
+        piai run "Explain async/await in Python" --model gpt-5.1-codex-mini
     """
     asyncio.run(_do_run(prompt, model, system, provider))
 

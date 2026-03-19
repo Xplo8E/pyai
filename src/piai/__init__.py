@@ -18,7 +18,7 @@ Quick start:
     )
 
     async def main():
-        async for event in stream("gpt-4o", ctx):
+        async for event in stream("gpt-5.1-codex-mini", ctx):
             from piai.types import TextDeltaEvent
             if isinstance(event, TextDeltaEvent):
                 print(event.text, end="", flush=True)
