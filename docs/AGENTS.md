@@ -36,8 +36,15 @@ src/piai/
 │   ├── server.py            # MCPServer config (stdio/http/sse + from_config + from_toml)
 │   ├── client.py            # MCPClient — persistent connection to one MCP server
 │   └── hub.py               # MCPHub — manages N servers, merges tools, routes calls
+├── mcp/
+│   ├── __init__.py          # exports MCPServer, MCPClient, MCPHub, to_langchain_tools, MCPHubToolset
+│   ├── server.py            # MCPServer config (stdio/http/sse + from_config + from_toml)
+│   ├── client.py            # MCPClient — persistent connection to one MCP server
+│   ├── hub.py               # MCPHub — manages N servers, merges tools, routes calls
+│   └── langchain_tools.py   # MCP → LangChain bridge (to_langchain_tools, MCPHubToolset, MCPLangChainTool)
 ├── langchain/
-│   └── chat_model.py        # PiAIChatModel — LangChain BaseChatModel adapter
+│   ├── chat_model.py        # PiAIChatModel — LangChain BaseChatModel adapter
+│   └── sub_agent_tool.py    # SubAgentTool — full piai agent() as a LangChain BaseTool
 └── providers/
     ├── message_transform.py # Context → OpenAI Responses API wire format
     └── openai_codex.py      # SSE streaming + _StreamProcessor state machine
@@ -49,6 +56,7 @@ tests/
     test_sse_parser.py
     test_mcp.py
     test_langchain.py
+    test_langgraph_integration.py
 docs/
     architecture.md          # Design overview and flow diagrams
     internals.md             # Per-module deep-dive
@@ -199,6 +207,24 @@ options = {
 ---
 
 ## Changelog
+
+### 2026-03-20 — LangGraph integration
+- **New** `src/piai/mcp/langchain_tools.py`: MCP → LangChain tool bridge
+  - `to_langchain_tools(servers) → (list[MCPLangChainTool], MCPHub)` — converts MCP servers to LangChain tools
+  - `MCPHubToolset` — async context manager version (auto-connect + close)
+  - `MCPLangChainTool` — individual MCP tool as a LangChain `BaseTool`
+- **New** `src/piai/langchain/sub_agent_tool.py`: `SubAgentTool`
+  - Wraps a full piai `agent()` (with its own model + MCP servers) as a single `BaseTool`
+  - Designed for use as a sub-agent inside a LangGraph Supervisor
+- **Fix** `langchain/chat_model.py`: `_run_async()` helper — detects running event loop and dispatches to a fresh thread, fixing `asyncio.run()` errors inside LangGraph
+- **Fix** `langchain/sub_agent_tool.py`: `_run()` now uses `asyncio.get_running_loop()` instead of deprecated `asyncio.get_event_loop()`, with same thread-safe dispatch
+- **Fix** `mcp/langchain_tools.py`: `MCPLangChainTool._run()` — same thread-safe async dispatch as above
+- **Examples** Added 3 new examples:
+  - `examples/radare2_binary_analysis.py` — piai agent + r2mcp for binary RE
+  - `examples/ida_binary_analysis.py` — piai agent + IDA Pro MCP
+  - `examples/langgraph_supervisor_agent.py` — LangGraph Supervisor with MCP bridge + SubAgentTool
+- **Tests** Added `test_langgraph_integration.py` (21 tests): covers MCP bridge, SubAgentTool, schema generation, hub toolset
+- **Total tests:** 223
 
 ### 2026-03-19 — Examples + temperature note
 - **Examples** Added `examples/` directory with two runnable examples:

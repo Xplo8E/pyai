@@ -436,6 +436,77 @@ llm_with_tools = llm.bind_tools([my_tool])
 result = llm_with_tools.invoke([HumanMessage(content="Use the tool")])
 ```
 
+Install with LangGraph extras:
+
+```bash
+pip install "pi-ai-py[langgraph]"
+```
+
+---
+
+## LangGraph integration
+
+piai integrates with [LangGraph](https://langchain-ai.github.io/langgraph/) for building multi-agent workflows. Two components are provided:
+
+### MCP → LangChain tool bridge
+
+Convert MCP servers into LangChain `BaseTool` instances so LangGraph agents can use them directly:
+
+```python
+from piai.mcp import to_langchain_tools, MCPServer, MCPHubToolset
+from langchain_core.messages import HumanMessage
+from langgraph.prebuilt import create_react_agent
+from piai.langchain import PiAIChatModel
+
+servers = [MCPServer.stdio("npx -y @modelcontextprotocol/server-filesystem /tmp")]
+llm = PiAIChatModel(model_name="gpt-5.1-codex-mini")
+
+async with MCPHubToolset(servers) as tools:
+    agent = create_react_agent(llm, tools)
+    result = await agent.ainvoke({"messages": [HumanMessage(content="List files in /tmp")]})
+    print(result["messages"][-1].content)
+```
+
+### SubAgentTool — piai agent as a LangGraph tool
+
+Wrap a full piai `agent()` (with its own model + MCP servers) as a single `BaseTool`. Use as a sub-agent inside a LangGraph Supervisor:
+
+```python
+from piai.langchain import SubAgentTool
+from piai.mcp import MCPServer
+
+file_agent = SubAgentTool(
+    name="file_agent",
+    description="Reads, writes, and analyses files using the filesystem MCP server",
+    model_id="gpt-5.1-codex-mini",
+    system_prompt="You are a file management specialist.",
+    mcp_servers=[MCPServer.stdio("npx -y @modelcontextprotocol/server-filesystem /tmp")],
+)
+```
+
+### LangGraph Supervisor example
+
+```python
+from piai.langchain import PiAIChatModel, SubAgentTool
+from piai.mcp import MCPServer
+from langgraph_supervisor import create_supervisor
+from langchain_core.messages import HumanMessage
+
+supervisor_llm = PiAIChatModel(model_name="gpt-5.1-codex-mini")
+file_agent = SubAgentTool(name="file_agent", description="...", mcp_servers=[...])
+code_agent = SubAgentTool(name="code_agent", description="...", mcp_servers=[...])
+
+workflow = create_supervisor(
+    agents=[file_agent, code_agent],
+    model=supervisor_llm,
+    prompt="You are a supervisor. Delegate tasks to the appropriate specialist.",
+).compile()
+
+result = await workflow.ainvoke({"messages": [HumanMessage(content="Analyse the code in /tmp/app.py")]})
+```
+
+See [`examples/langgraph_supervisor_agent.py`](examples/langgraph_supervisor_agent.py) for a full runnable example.
+
 ---
 
 ## Project structure
@@ -450,9 +521,11 @@ src/piai/
 ├── mcp/
 │   ├── server.py            # MCPServer config (stdio/http/sse + from_toml)
 │   ├── client.py            # MCPClient — persistent session per server
-│   └── hub.py               # MCPHub — multi-server manager
+│   ├── hub.py               # MCPHub — multi-server manager
+│   └── langchain_tools.py   # MCP → LangChain tool bridge (to_langchain_tools, MCPHubToolset)
 ├── langchain/
-│   └── chat_model.py        # PiAIChatModel — LangChain BaseChatModel adapter
+│   ├── chat_model.py        # PiAIChatModel — LangChain BaseChatModel adapter
+│   └── sub_agent_tool.py    # SubAgentTool — piai agent as LangChain BaseTool
 ├── oauth/
 │   ├── pkce.py              # PKCE verifier/challenge (RFC 7636)
 │   ├── types.py             # OAuthCredentials, OAuthProviderInterface

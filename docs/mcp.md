@@ -285,3 +285,44 @@ async with MCPHub([
     print(hub.all_tools())
     result = await hub.call_tool("open_file", {"file_path": "/lib/target.so"})
 ```
+
+---
+
+## Using MCP tools with LangGraph
+
+piai provides a bridge to convert MCP servers into LangChain `BaseTool` instances so they work inside LangGraph agents, ReAct agents, and Supervisors.
+
+### `to_langchain_tools` — one-shot conversion
+
+```python
+from piai.mcp import to_langchain_tools, MCPServer
+
+servers = [MCPServer.stdio("npx -y @modelcontextprotocol/server-filesystem /tmp")]
+tools, hub = await to_langchain_tools(servers)
+
+# Use tools in any LangChain/LangGraph agent
+from langgraph.prebuilt import create_react_agent
+from piai.langchain import PiAIChatModel
+
+llm = PiAIChatModel(model_name="gpt-5.1-codex-mini")
+agent = create_react_agent(llm, tools)
+
+await hub.close()  # clean up when done
+```
+
+### `MCPHubToolset` — async context manager
+
+Handles connect + disconnect automatically:
+
+```python
+from piai.mcp import MCPHubToolset, MCPServer
+from langgraph.prebuilt import create_react_agent
+from piai.langchain import PiAIChatModel
+
+servers = [MCPServer.stdio("npx -y @modelcontextprotocol/server-filesystem /tmp")]
+llm = PiAIChatModel(model_name="gpt-5.1-codex-mini")
+
+async with MCPHubToolset(servers) as tools:
+    agent = create_react_agent(llm, tools)
+    result = await agent.ainvoke({"messages": [HumanMessage(content="List /tmp")]})
+```

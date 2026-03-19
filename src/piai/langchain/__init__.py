@@ -16,5 +16,6 @@ Requires:
 """
 
 from .chat_model import PiAIChatModel
+from .sub_agent_tool import SubAgentTool
 
-__all__ = ["PiAIChatModel"]
+__all__ = ["PiAIChatModel", "SubAgentTool"]
