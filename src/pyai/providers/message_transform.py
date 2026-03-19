@@ -162,7 +162,7 @@ def build_request_body(
         "model": model_id,
         "store": False,
         "stream": True,
-        "instructions": context.system_prompt,
+        "instructions": context.system_prompt or "You are a helpful assistant.",
         "input": messages,
         "text": {"verbosity": opts.get("text_verbosity", "medium")},
         "include": ["reasoning.encrypted_content"],

@@ -162,7 +162,7 @@ def status():
 
 @cli.command()
 @click.argument("prompt")
-@click.option("--model", "-m", default="gpt-4o-mini", help="Model ID to use")
+@click.option("--model", "-m", default="gpt-5.1-codex-mini", help="Model ID to use")
 @click.option("--system", "-s", default=None, help="System prompt")
 @click.option("--provider", default="openai-codex", help="Provider ID")
 def run(prompt: str, model: str, system: str | None, provider: str):
