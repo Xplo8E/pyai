@@ -2,24 +2,24 @@
 MCP → LangChain tool bridge.
 
 Converts piai MCP servers into LangChain BaseTool objects so they can be
-used directly inside LangGraph, LangChain AgentExecutor, create_react_agent,
-create_supervisor, or any other LangChain-based orchestrator.
+used directly inside LangGraph agents, create_supervisor, or any other
+LangChain-based orchestrator.
 
 Usage:
     from piai.mcp import MCPServer, to_langchain_tools
 
-    tools = await to_langchain_tools([
+    tools, hub = await to_langchain_tools([
         MCPServer.stdio("r2pm -r r2mcp"),
         MCPServer.http("http://localhost:13337/mcp"),
     ])
 
-    # Drop directly into LangGraph
-    from langgraph.prebuilt import create_react_agent
-    agent = create_react_agent(llm, tools=tools)
+    # Drop directly into a LangGraph agent (modern API)
+    from langchain.agents import create_agent
+    agent = create_agent(model=llm, tools=tools)
 
-    # Or into LangChain AgentExecutor
-    from langchain.agents import AgentExecutor
-    executor = AgentExecutor(agent=..., tools=tools)
+    # Or use MCPHubToolset as an async context manager
+    async with MCPHubToolset([...]) as tools:
+        agent = create_agent(model=llm, tools=tools)
 
 Notes:
     - The MCPHub connection stays alive for the lifetime of the returned tools.
@@ -127,7 +127,7 @@ class MCPHubToolset:
 
     Usage:
         async with MCPHubToolset([MCPServer.stdio("r2pm -r r2mcp")]) as tools:
-            agent = create_react_agent(llm, tools=tools)
+            agent = create_agent(llm, tools=tools)
             result = await agent.ainvoke({"messages": [...]})
     """
 
@@ -202,7 +202,7 @@ async def to_langchain_tools(
             MCPServer.http("http://localhost:13337/mcp"),
         ])
         try:
-            agent = create_react_agent(llm, tools=tools)
+            agent = create_agent(llm, tools=tools)
             result = await agent.ainvoke({"messages": [...]})
         finally:
             await hub.close()
@@ -210,7 +210,7 @@ async def to_langchain_tools(
     Tip:
         Use MCPHubToolset for automatic cleanup:
             async with MCPHubToolset(servers) as tools:
-                agent = create_react_agent(llm, tools=tools)
+                agent = create_agent(llm, tools=tools)
     """
     hub = MCPHub(
         servers,

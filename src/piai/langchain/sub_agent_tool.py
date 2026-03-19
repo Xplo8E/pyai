@@ -12,7 +12,7 @@ Usage:
     from piai.langchain import SubAgentTool
     from piai.mcp import MCPServer
     from langgraph_supervisor import create_supervisor
-    from langgraph.prebuilt import create_react_agent
+    from langchain.agents import create_agent
 
     # A piai sub-agent with its own MCP servers
     binary_analyzer = SubAgentTool(
@@ -27,10 +27,10 @@ Usage:
     )
 
     # A plain LangGraph sub-agent (no MCP needed)
-    reporter = create_react_agent(
+    reporter = create_agent(
         model=PiAIChatModel(model_name="gpt-5.1-codex-mini"),
         tools=[],
-        prompt="You write clear, concise security reports.",
+        system_prompt="You write clear, concise security reports.",
         name="reporter",
     )
 
@@ -42,7 +42,7 @@ Usage:
         prompt="You are a security team supervisor...",
     )
     app = workflow.compile()
-    result = app.invoke({"messages": [{"role": "user", "content": "Analyze /lib/target.so"}]})
+    result = await app.ainvoke({"messages": [{"role": "user", "content": "Analyze /lib/target.so"}]})
 
 Requires:
     pip install langchain-core langgraph-supervisor

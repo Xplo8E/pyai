@@ -18,7 +18,7 @@ import asyncio
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from langgraph_supervisor import create_supervisor
 
 from piai.langchain import PiAIChatModel, SubAgentTool
@@ -49,18 +49,18 @@ async def run_with_mcp_bridge():
     ) as mcp_tools:
 
         # Sub-agent: standard LangGraph react agent + MCP filesystem tools
-        file_agent = create_react_agent(
+        file_agent = create_agent(
             model=PiAIChatModel(model_name="gpt-5.1-codex-mini"),
             tools=mcp_tools,   # MCP tools visible to LangGraph thanks to bridge
-            prompt="You are a filesystem expert. Use the available tools to read and explore files.",
+            system_prompt="You are a filesystem expert. Use the available tools to read and explore files.",
             name="file_agent",
         )
 
         # Sub-agent: local tools only, different model
-        math_agent = create_react_agent(
+        math_agent = create_agent(
             model=PiAIChatModel(model_name="gpt-5.1-codex-mini"),
             tools=[calculator],
-            prompt="You are a math expert. Use the calculator tool for all computations.",
+            system_prompt="You are a math expert. Use the calculator tool for all computations.",
             name="math_agent",
         )
 
@@ -113,10 +113,10 @@ async def run_with_sub_agent_tool():
     )
 
     # Plain react agent for math (no MCP needed)
-    math_agent = create_react_agent(
+    math_agent = create_agent(
         model=PiAIChatModel(model_name="gpt-5.1-codex-mini"),
         tools=[calculator],
-        prompt="You are a math expert.",
+        system_prompt="You are a math expert.",
         name="math_agent",
     )
 
