@@ -115,19 +115,19 @@ class SubAgentTool(BaseTool):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _run(self, task: str, **kwargs: Any) -> str:
-        """Sync run — executes async agent in event loop."""
+        """Sync run — safely handles running event loop (e.g. inside LangGraph threads)."""
+        import concurrent.futures
+
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # We're inside an async context — use run_until_complete won't work.
-                # Create a new thread with its own event loop.
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(asyncio.run, self._arun(task))
-                    return future.result()
-            else:
-                return loop.run_until_complete(self._arun(task))
-        except Exception:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, self._arun(task))
+                return future.result()
+        else:
             return asyncio.run(self._arun(task))
 
     async def _arun(self, task: str, **kwargs: Any) -> str:

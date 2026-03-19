@@ -171,7 +171,17 @@ def langchain_react_agent():
 
             @tool(name=name, description=desc)
             def _mcp_tool(**kwargs) -> str:
-                return asyncio.get_event_loop().run_until_complete(h.call_tool(name, kwargs))
+                import concurrent.futures
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None and loop.is_running():
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(asyncio.run, h.call_tool(name, kwargs))
+                        return future.result()
+                else:
+                    return asyncio.run(h.call_tool(name, kwargs))
 
             return _mcp_tool
 

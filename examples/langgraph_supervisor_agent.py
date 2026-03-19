@@ -79,7 +79,7 @@ async def run_with_mcp_bridge():
         )
         app = workflow.compile()
 
-        result = app.invoke({
+        result = await app.ainvoke({
             "messages": [HumanMessage(content="List files in /tmp and also calculate 17 * 23.")]
         })
         print("Result:", result["messages"][-1].content)
@@ -135,7 +135,7 @@ async def run_with_sub_agent_tool():
     )
     app = workflow.compile()
 
-    result = app.invoke({
+    result = await app.ainvoke({
         "messages": [HumanMessage(content="What files are in /tmp? Also what is 99 * 88?")]
     })
     print("Result:", result["messages"][-1].content)

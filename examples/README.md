@@ -76,6 +76,37 @@ python examples/ida_binary_analysis.py /path/to/binary.so --http
 
 ---
 
+## Example 5 — LangGraph Supervisor + piai + MCP
+
+`langgraph_supervisor_agent.py` — A LangGraph supervisor orchestrating specialist sub-agents, with piai as the underlying model and MCP tools available to the agents.
+
+Demonstrates two patterns for connecting sub-agents to MCP:
+
+| Pattern | Function | How it works |
+|---------|----------|-------------|
+| **Option A** — MCP bridge | `run_with_mcp_bridge()` | `MCPHubToolset` converts MCP tools into standard LangChain tools, passed directly to `create_react_agent`. Agents are full LangGraph nodes visible to the supervisor. |
+| **Option B** — SubAgentTool | `run_with_sub_agent_tool()` | A complete piai agent (with its own MCP server, model, and system prompt) is wrapped as a single callable tool via `SubAgentTool`. The supervisor treats it as a black box. |
+
+```bash
+uv add langgraph langgraph-supervisor langchain-core
+
+uv run examples/langgraph_supervisor_agent.py
+```
+
+**What it shows:**
+- `PiAIChatModel` as the model for both supervisor and sub-agents
+- `MCPHubToolset` bridging MCP servers → LangChain tools (Option A)
+- `SubAgentTool` wrapping a full piai agent as a supervisor-callable tool (Option B)
+- `await app.ainvoke()` — required when calling LangGraph from an async context (avoids event loop deadlock with MCP's anyio stdio client)
+- `create_supervisor` from `langgraph-supervisor` for autonomous multi-agent orchestration
+
+**When to use each pattern:**
+
+- **Option A** — sub-agents share the same MCP servers; supervisor can inspect agent state
+- **Option B** — each specialist needs its own MCP servers / model / config; clean black-box isolation
+
+---
+
 ## Notes
 
 - All examples use `gpt-5.1-codex-mini` by default — change `model_id` to any model your ChatGPT Plus/Pro plan supports
