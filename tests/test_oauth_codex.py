@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from pyai.oauth.openai_codex import (
+from piai.oauth.openai_codex import (
     extract_account_id,
     _decode_jwt_payload,
     _build_auth_url,
@@ -16,7 +16,7 @@ from pyai.oauth.openai_codex import (
     CLIENT_ID,
     AUTHORIZE_URL,
 )
-from pyai.oauth.types import OAuthCredentials
+from piai.oauth.types import OAuthCredentials
 
 
 # ------------------------------------------------------------------ #

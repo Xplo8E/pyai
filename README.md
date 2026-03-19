@@ -1,4 +1,4 @@
-# pyai
+# piai
 
 Python port of [@mariozechner/pi-ai](https://github.com/badlogic/pi-mono) — use your **ChatGPT Plus/Pro subscription** to access GPT models from Python, without paying per-token API rates.
 
@@ -25,21 +25,21 @@ The library logs in to ChatGPT using the same OAuth flow the official web app us
 ### From source
 
 ```bash
-git clone https://github.com/Xplo8E/pyai
-cd pyai
+git clone https://github.com/Xplo8E/piai
+cd piai
 uv sync
 ```
 
 ### As a dependency in your project
 
 ```bash
-uv add git+https://github.com/Xplo8E/pyai
+uv add git+https://github.com/Xplo8E/piai
 ```
 
 Or with pip:
 
 ```bash
-pip install git+https://github.com/Xplo8E/pyai
+pip install piai
 ```
 
 ---
@@ -49,9 +49,9 @@ pip install git+https://github.com/Xplo8E/pyai
 Run once to authenticate. Opens a browser for you to log in with your ChatGPT account.
 
 ```bash
-uv run pyai login
+uv run piai login
 # or after installing as a package:
-pyai login
+piai login
 ```
 
 Credentials are saved to `auth.json` in your current working directory. Keep this file private — add it to `.gitignore`.
@@ -62,22 +62,22 @@ Credentials are saved to `auth.json` in your current working directory. Keep thi
 
 ```bash
 # Quick one-shot prompt
-pyai run "Explain async/await in Python"
+piai run "Explain async/await in Python"
 
 # Specify a model
-pyai run "What is 2+2?" --model gpt-5.1
+piai run "What is 2+2?" --model gpt-5.1
 
 # With a system prompt
-pyai run "Summarize this" --system "You are a concise assistant"
+piai run "Summarize this" --system "You are a concise assistant"
 
 # Check login status
-pyai status
+piai status
 
 # List available OAuth providers
-pyai list
+piai list
 
 # Log out
-pyai logout
+piai logout
 ```
 
 ---
@@ -90,8 +90,8 @@ Streams the model response as typed events. Handles auth and token refresh autom
 
 ```python
 import asyncio
-from pyai import stream
-from pyai.types import Context, UserMessage, TextDeltaEvent, DoneEvent
+from piai import stream
+from piai.types import Context, UserMessage, TextDeltaEvent, DoneEvent
 
 async def main():
     ctx = Context(
@@ -115,15 +115,15 @@ Collects the full response and returns an `AssistantMessage`.
 
 ```python
 import asyncio
-from pyai import complete
-from pyai.types import Context, UserMessage
+from piai import complete
+from piai.types import Context, UserMessage
 
 async def main():
     ctx = Context(messages=[UserMessage(content="Write a haiku about Python.")])
     msg = await complete("gpt-5.1-codex-mini", ctx)
 
     for block in msg.content:
-        from pyai.types import TextContent
+        from piai.types import TextContent
         if isinstance(block, TextContent):
             print(block.text)
 
@@ -139,8 +139,8 @@ Simplest interface — returns the full response text as a string.
 
 ```python
 import asyncio
-from pyai import complete_text
-from pyai.types import Context, UserMessage
+from piai import complete_text
+from piai.types import Context, UserMessage
 
 async def main():
     ctx = Context(messages=[UserMessage(content="What is 2 + 2?")])
@@ -158,8 +158,8 @@ Append messages to `context.messages` to continue a conversation:
 
 ```python
 import asyncio
-from pyai import complete
-from pyai.types import Context, UserMessage
+from piai import complete
+from piai.types import Context, UserMessage
 
 async def main():
     ctx = Context(system_prompt="You are a helpful assistant.")
@@ -172,7 +172,7 @@ async def main():
     response = await complete("gpt-5.1-codex-mini", ctx)
     ctx.messages.append(response)
 
-    from pyai.types import TextContent
+    from piai.types import TextContent
     for block in response.content:
         if isinstance(block, TextContent):
             print(block.text)
@@ -189,8 +189,8 @@ Define tools with a JSON Schema `parameters` dict:
 ```python
 import asyncio
 import json
-from pyai import stream
-from pyai.types import (
+from piai import stream
+from piai.types import (
     Context, UserMessage, ToolResultMessage, Tool,
     ToolCallStartEvent, ToolCallEndEvent, TextDeltaEvent, DoneEvent,
 )
@@ -307,7 +307,7 @@ Credentials are stored as JSON, compatible with the original JS `pi-ai` SDK:
 }
 ```
 
-If you've already logged in using the JS CLI (`npx @mariozechner/pi-ai login openai-codex`), the same `auth.json` works with `pyai` without re-logging in.
+If you've already logged in using the JS CLI (`npx @mariozechner/pi-ai login openai-codex`), the same `auth.json` works with `piai` without re-logging in.
 
 **Never commit `auth.json` to version control.**
 
@@ -316,7 +316,7 @@ If you've already logged in using the JS CLI (`npx @mariozechner/pi-ai login ope
 ## Project structure
 
 ```
-src/pyai/
+src/piai/
 ├── __init__.py              # Public API: stream, complete, complete_text + all types
 ├── types.py                 # Context, messages, stream events
 ├── stream.py                # Entry points with auth handling

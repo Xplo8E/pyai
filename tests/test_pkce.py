@@ -8,7 +8,7 @@ that the JS SDK produces.
 import base64
 import hashlib
 
-from pyai.oauth.pkce import generate_pkce, _base64url_encode
+from piai.oauth.pkce import generate_pkce, _base64url_encode
 
 
 def test_generate_pkce_returns_strings():

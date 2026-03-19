@@ -9,8 +9,8 @@ Quick start:
 
     # 2. Use in code
     import asyncio
-    from pyai import complete_text, stream
-    from pyai.types import Context, UserMessage
+    from piai import complete_text, stream
+    from piai.types import Context, UserMessage
 
     ctx = Context(
         system_prompt="You are a helpful assistant.",
@@ -19,7 +19,7 @@ Quick start:
 
     async def main():
         async for event in stream("gpt-4o", ctx):
-            from pyai.types import TextDeltaEvent
+            from piai.types import TextDeltaEvent
             if isinstance(event, TextDeltaEvent):
                 print(event.text, end="", flush=True)
 

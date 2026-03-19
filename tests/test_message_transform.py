@@ -4,8 +4,8 @@ Tests for Context → OpenAI Responses API message transformation.
 
 import json
 
-from pyai.providers.message_transform import build_request_body, convert_messages, convert_tools
-from pyai.types import (
+from piai.providers.message_transform import build_request_body, convert_messages, convert_tools
+from piai.types import (
     AssistantMessage,
     Context,
     TextContent,

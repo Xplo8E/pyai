@@ -1,5 +1,5 @@
 [project]
-name = "pyai"
+name = "piai"
 version = "0.1.0"
 description = "Python port of @mariozechner/pi-ai — unified LLM API with ChatGPT Plus OAuth"
 readme = "README.md"
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-pyai = "pyai.cli:cli"
+piai = "piai.cli:cli"
 
 [build-system]
 requires = ["uv_build>=0.8.14,<0.9.0"]
