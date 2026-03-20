@@ -1,6 +1,6 @@
 # MCP Integration
 
-piai has a native MCP (Model Context Protocol) client built in. No LangChain, no mcpo, no manual tool wrappers — just pass your MCP server configs and the agent handles everything automatically.
+piai has a native MCP (Model Context Protocol) client. Pass any MCP server and `agent()` auto-discovers tools, runs the model in a loop, executes tool calls, and returns when the model stops. No LangChain, no mcpo, no manual wrappers needed.
 
 ---
 
@@ -17,18 +17,23 @@ ctx = Context(messages=[UserMessage(content="Analyze /lib/target.so")])
 result = await agent(
     model_id="gpt-5.1-codex-mini",
     context=ctx,
-    mcp_servers=[
-        MCPServer.stdio("r2pm -r r2mcp"),
-    ],
+    mcp_servers=[MCPServer.stdio("r2pm -r r2mcp")],
+    options={"reasoning_effort": "medium"},
+    max_turns=30,
 )
-print(result)
+
+print(result.text)
+if result.thinking:
+    print(f"Model reasoned {len(result.thinking)} chars")
 ```
 
-That's it. piai will:
+piai will:
 1. Spawn the MCP server subprocess
 2. Auto-discover all tools it exposes
-3. Run the model in a loop, executing tool calls as requested
+3. Run the model in a loop — executing tool calls, feeding results back
 4. Return the final `AssistantMessage` when the model stops
+
+`result.text` gives you the full response. `result.thinking` gives you the full reasoning text (or `None` if the model didn't reason).
 
 ---
 
@@ -36,41 +41,38 @@ That's it. piai will:
 
 ### stdio — local subprocess
 
-Spawns a process and communicates via stdin/stdout. Works with any MCP server that runs as a subprocess. Uses `shlex.split` so paths with spaces are handled correctly.
+Spawns a process and communicates via stdin/stdout. Uses `shlex.split` so paths with spaces work correctly.
 
 ```python
-# Simple command
 MCPServer.stdio("r2pm -r r2mcp")
 
-# Path with spaces — handled correctly via shlex.split
-MCPServer.stdio('"/path with spaces/server" --flag')
-
-# With explicit name (used for namespacing on tool collisions)
+# With explicit name (used as namespace prefix on tool collisions)
 MCPServer.stdio("ida-mcp", name="ida")
 
-# Add env vars ON TOP of parent env (preserves PATH etc.)
+# Add env vars on top of parent env (preserves PATH etc.)
 MCPServer.stdio("my-server", env_extra={"API_KEY": "secret"})
 
 # Replace env entirely (use carefully)
 MCPServer.stdio("my-server", env={"ONLY": "this"})
+
+# Paths with spaces
+MCPServer.stdio('"/path with spaces/server" --flag')
 ```
 
 ### http — Streamable HTTP (modern)
 
-Connects to an MCP server over HTTP. The recommended transport for remote or long-running servers.
+Recommended for remote or long-running servers.
 
 ```python
 MCPServer.http("http://127.0.0.1:13337/mcp")
 MCPServer.http("http://127.0.0.1:13337/mcp", name="ida")
-# bearer_token shorthand
 MCPServer.http("https://api.example.com/mcp", bearer_token="my-token")
-# explicit headers
 MCPServer.http("https://api.example.com/mcp", headers={"X-Api-Key": "abc"})
 ```
 
 ### sse — Server-Sent Events (legacy)
 
-For older MCP servers that use the SSE transport instead of Streamable HTTP.
+For older MCP servers that use SSE instead of Streamable HTTP.
 
 ```python
 MCPServer.sse("http://localhost:9000/sse")
@@ -81,62 +83,67 @@ MCPServer.sse("http://localhost:9000/sse", headers={"Authorization": "Bearer tok
 
 ## Multiple MCP servers
 
-Pass an array of servers. piai connects to all of them concurrently, merges their tools into a flat list, and routes each tool call to the correct server automatically. The model picks whatever tool fits the task — it doesn't know or care which server it came from.
+Pass multiple servers — piai connects to all concurrently, merges their tools into a flat list, and routes each tool call to the right server automatically.
 
 ```python
 result = await agent(
     model_id="gpt-5.1-codex-mini",
     context=ctx,
     mcp_servers=[
-        MCPServer.stdio("r2pm -r r2mcp"),                           # radare2 tools
-        MCPServer.stdio("npx @modelcontextprotocol/server-filesystem /tmp"),  # filesystem
-        MCPServer.http("http://127.0.0.1:13337/mcp", name="ida"),   # IDA Pro
+        MCPServer.stdio("r2pm -r r2mcp"),
+        MCPServer.stdio("npx @modelcontextprotocol/server-filesystem /tmp"),
+        MCPServer.http("http://127.0.0.1:13337/mcp", name="ida"),
     ],
 )
 ```
 
 ### Tool name collisions
 
-If two servers expose a tool with the same name, **both** are namespaced with their server name:
+If two servers expose a tool with the same name, both are namespaced:
 
 ```
-server1 exposes: read_file       → registered as: s1__read_file
-server2 exposes: read_file       → registered as: s2__read_file
+server1: read_file  →  s1__read_file
+server2: read_file  →  s2__read_file
 ```
 
-A warning is logged. The model sees both namespaced versions and picks the right one from context.
-Set explicit names to control the namespace prefix:
+A warning is logged. Set explicit names to control the prefix:
 
 ```python
-MCPServer.stdio("r2pm -r r2mcp", name="r2")    # collision → r2__tool_name
+MCPServer.stdio("r2pm -r r2mcp", name="r2")   # collision → r2__tool_name
 MCPServer.stdio("ida-mcp", name="ida")          # collision → ida__tool_name
 ```
 
-### Loading servers from config files
-
-`MCPServer.from_config()` accepts the same dict format as Claude/Codex `config.toml`:
+### Loading from config files
 
 ```python
-# From TOML config (e.g. ~/.codex/config.toml mcp_servers section)
-import tomllib
-
-with open("~/.codex/config.toml", "rb") as f:
-    config = tomllib.load(f)
-
-servers = [
-    MCPServer.from_config({**cfg, "name": name})
-    for name, cfg in config.get("mcp_servers", {}).items()
-]
-
+# From TOML (e.g. ~/.piai/config.toml)
+servers = MCPServer.from_toml("~/.piai/config.toml")
 result = await agent(model_id="gpt-5.1-codex-mini", context=ctx, mcp_servers=servers)
 ```
 
+```toml
+# ~/.piai/config.toml
+[mcp_servers.r2]
+command = "r2pm"
+args = ["-r", "r2mcp"]
+
+[mcp_servers.ida]
+command = "ida-mcp"
+
+[mcp_servers.ida-http]
+url = "http://127.0.0.1:13337/mcp"
+
+[mcp_servers.remote]
+url = "https://api.example.com/mcp"
+bearer_token = "my-token"
+```
+
+Or from a dict directly:
+
 ```python
-# Direct dict config
 MCPServer.from_config({"command": "ida-mcp", "name": "ida"})
 MCPServer.from_config({"url": "http://127.0.0.1:13337/mcp"})
 MCPServer.from_config({"command": "r2pm", "args": ["-r", "r2mcp"]})
-MCPServer.from_config({"url": "https://api.example.com/mcp", "bearer_token": "tok"})
 ```
 
 ---
@@ -145,35 +152,108 @@ MCPServer.from_config({"url": "https://api.example.com/mcp", "bearer_token": "to
 
 ```python
 result = await agent(
-    model_id="gpt-5.1-codex-mini",       # any supported model
-    context=ctx,                           # Context with messages + optional system_prompt
-    mcp_servers=[...],                     # list of MCPServer configs (or None for no MCP)
-    options={                              # passed to piai stream()
-        "reasoning_effort": "medium",      # low / medium / high
-        "session_id": "my-session",        # optional session continuity
+    model_id="gpt-5.1-codex-mini",
+    context=ctx,
+    mcp_servers=[...],
+    options={
+        "reasoning_effort": "medium",   # low / medium / high
+        "reasoning_summary": "auto",    # auto / concise / detailed / off
+        "session_id": "my-session",     # optional session continuity
     },
-    provider_id="openai-codex",            # default, don't need to set
-    max_turns=20,                          # safety limit on loop iterations (default: 20)
-    on_event=my_callback,                  # optional: sync or async callback for every StreamEvent
-    require_all_servers=False,             # if True, raise if any server fails to connect
-    connect_timeout=60.0,                  # per-server connection timeout in seconds
-    tool_result_max_chars=32_000,          # max chars per tool result (prevents context explosion)
+    max_turns=20,                       # safety limit on loop iterations (default: 20)
+    on_event=my_callback,               # sync or async callback for every StreamEvent
+    require_all_servers=False,          # True = raise if any server fails to connect
+    connect_timeout=60.0,               # per-server connection timeout in seconds
+    tool_result_max_chars=32_000,       # max chars per tool result (prevents context explosion)
 )
 ```
 
-### Live streaming with on_event
+---
+
+## Full observability with on_event
+
+`on_event` fires for every `StreamEvent` in the loop — reasoning, text, tool calls, and results. This gives you complete inner-loop visibility: you can see exactly what the model is thinking, what tools it's calling, and what they returned, all in real time.
+
+### Available events
+
+**Stream events** (model output):
+
+| Event | Fields | Description |
+|---|---|---|
+| `ThinkingStartEvent` | — | Model started a reasoning block |
+| `ThinkingDeltaEvent` | `thinking: str` | Incremental reasoning chunk |
+| `ThinkingEndEvent` | `thinking: str` | Full reasoning text for this block |
+| `TextDeltaEvent` | `text: str` | Incremental response text chunk |
+| `ToolCallStartEvent` | `tool_call: ToolCall` | Model started a tool call |
+| `ToolCallEndEvent` | `tool_call: ToolCall` | Complete tool call with parsed input |
+| `DoneEvent` | `reason: str`, `message: AssistantMessage` | Stream complete |
+| `ErrorEvent` | `reason: str`, `error: AssistantMessage` | Stream failed |
+
+**Agent loop events** (agentic execution):
+
+| Event | Fields | Description |
+|---|---|---|
+| `AgentToolCallEvent` | `turn: int`, `tool_name: str`, `tool_input: dict` | Just before a tool is executed |
+| `AgentToolResultEvent` | `turn: int`, `tool_name: str`, `tool_input: dict`, `result: str`, `error: bool` | After tool execution completes |
+| `AgentTurnEndEvent` | `turn: int`, `thinking: str \| None`, `tool_calls: list[ToolCall]` | Summary at end of each loop turn |
+
+> `ThinkingEndEvent.thinking` always has the full text for the block even if `ThinkingDeltaEvent` was sparse or empty — the backend controls delta granularity.
+
+### Full observability callback
 
 ```python
-from piai.types import TextDeltaEvent, ToolCallEndEvent
+from piai.types import (
+    ThinkingStartEvent, ThinkingDeltaEvent, ThinkingEndEvent,
+    AgentToolCallEvent, AgentToolResultEvent, AgentTurnEndEvent,
+    TextDeltaEvent,
+)
+
+DIM, CYAN, GREEN, YELLOW, RESET = "\033[2m", "\033[36m", "\033[32m", "\033[33m", "\033[0m"
 
 def on_event(event):
-    if isinstance(event, TextDeltaEvent):
-        print(event.text, end="", flush=True)
-    elif isinstance(event, ToolCallEndEvent):
-        print(f"\n[tool] {event.tool_call.name}({event.tool_call.input})")
+    if isinstance(event, ThinkingStartEvent):
+        print(f"\n{DIM}💭 Thinking...{RESET}", flush=True)
 
-result = await agent(..., on_event=on_event)
+    elif isinstance(event, ThinkingDeltaEvent):
+        print(f"{DIM}{event.thinking}{RESET}", end="", flush=True)
+
+    elif isinstance(event, ThinkingEndEvent):
+        print(f"\n{DIM}[thinking done]{RESET}\n", flush=True)
+
+    elif isinstance(event, AgentToolCallEvent):
+        args = ", ".join(
+            f"{k}={v[:60]!r}..." if isinstance(v, str) and len(v) > 60 else f"{k}={v!r}"
+            for k, v in event.tool_input.items()
+        )
+        print(f"\n{CYAN}🔧 Turn {event.turn} → {event.tool_name}({args}){RESET}", flush=True)
+
+    elif isinstance(event, AgentToolResultEvent):
+        status = "❌" if event.error else "✅"
+        preview = event.result[:200].replace("\n", " ")
+        print(f"{GREEN}{status} {preview}{'...' if len(event.result) > 200 else ''}{RESET}", flush=True)
+
+    elif isinstance(event, AgentTurnEndEvent):
+        note = f", {len(event.thinking)} chars reasoning" if event.thinking else ""
+        print(f"\n{YELLOW}── Turn {event.turn}: {len(event.tool_calls)} call(s){note} ──{RESET}\n", flush=True)
+
+    elif isinstance(event, TextDeltaEvent):
+        print(event.text, end="", flush=True)
+
+result = await agent(
+    model_id="gpt-5.1-codex-mini",
+    context=ctx,
+    mcp_servers=[MCPServer.stdio("r2pm -r r2mcp")],
+    options={"reasoning_effort": "medium"},
+    max_turns=30,
+    on_event=on_event,
+)
+
+print(f"\nDone. {len(result.text)} chars.")
+if result.thinking:
+    print(f"Total reasoning: {len(result.thinking)} chars")
 ```
+
+> The `on_event` callback can be async — piai awaits it automatically. You can write directly to websockets, queues, or any async sink.
 
 ---
 
@@ -197,48 +277,53 @@ result = await agent(
     mcp_servers=[MCPServer.stdio("r2pm -r r2mcp")],
     options={"reasoning_effort": "medium"},
     max_turns=30,
+    on_event=on_event,
 )
+print(result.text)
 ```
 
 ### Binary analysis with IDA Pro (stdio)
 
 ```python
-# ida-mcp runs headless IDA Pro, no GUI needed
+# ida-mcp runs headless IDA Pro — no GUI required
 result = await agent(
     model_id="gpt-5.1-codex-mini",
     context=ctx,
     mcp_servers=[MCPServer.stdio("ida-mcp", name="ida")],
     options={"reasoning_effort": "medium"},
     max_turns=40,
+    on_event=on_event,
 )
 ```
 
 ### Binary analysis with IDA Pro (HTTP server)
 
 ```python
-# Start IDA MCP HTTP server first:
-#   ida-mcp serve-http --port 13337
+# Start the IDA MCP HTTP server first: ida-mcp serve-http --port 13337
 result = await agent(
     model_id="gpt-5.1-codex-mini",
     context=ctx,
     mcp_servers=[MCPServer.http("http://127.0.0.1:13337/mcp", name="ida")],
+    on_event=on_event,
 )
 ```
 
 ### Filesystem operations
 
 ```python
-MCPServer.stdio("npx @modelcontextprotocol/server-filesystem /home/user/projects")
+MCPServer.stdio("npx -y @modelcontextprotocol/server-filesystem /home/user/projects")
 ```
 
 ### Web search + code analysis together
 
 ```python
 mcp_servers=[
-    MCPServer.stdio("npx @modelcontextprotocol/server-brave-search"),
+    MCPServer.stdio("npx -y @modelcontextprotocol/server-brave-search"),
     MCPServer.stdio("r2pm -r r2mcp"),
 ]
 ```
+
+See the [examples/](../examples/) directory for complete runnable examples.
 
 ---
 
@@ -256,17 +341,16 @@ agent()
   │
   └── loop:
         stream() → tool calls → hub.call_tool() → ToolResultMessage → continue
-                → stop → return AssistantMessage
+                → no tool calls → return AssistantMessage
 ```
 
-**Why MCPClient uses AsyncExitStack:**
-MCP servers like `r2mcp` and `ida-mcp` are stateful — you open a file in one call, analyze it in the next. `AsyncExitStack` keeps the subprocess/connection alive for the entire agent session. Without it, each tool call would spawn a fresh process and lose all state.
+**Why MCPClient uses AsyncExitStack:** MCP servers like `r2mcp` and `ida-mcp` are stateful — you open a file in one call, analyze it in the next. `AsyncExitStack` keeps the subprocess alive for the entire agent session. Without it, each tool call would spawn a fresh process and lose all state.
 
 ---
 
 ## Using MCPClient / MCPHub directly
 
-If you need lower-level access:
+For lower-level access without the agent loop:
 
 ```python
 from piai.mcp import MCPClient, MCPHub, MCPServer
@@ -290,9 +374,26 @@ async with MCPHub([
 
 ## Using MCP tools with LangGraph
 
-piai provides a bridge to convert MCP servers into LangChain `BaseTool` instances so they work inside LangGraph agents, ReAct agents, and Supervisors.
+piai provides a bridge to convert MCP servers into LangChain `BaseTool` instances for use in LangGraph agents and Supervisors.
 
-### `to_langchain_tools` — one-shot conversion
+### MCPHubToolset — async context manager (recommended)
+
+```python
+from piai.mcp import MCPHubToolset, MCPServer
+from piai.langchain import PiAIChatModel
+from langchain.agents import create_agent
+from langchain_core.messages import HumanMessage
+
+llm = PiAIChatModel(model_name="gpt-5.1-codex-mini")
+servers = [MCPServer.stdio("npx -y @modelcontextprotocol/server-filesystem /tmp")]
+
+async with MCPHubToolset(servers, connect_timeout=30.0) as tools:
+    agent = create_agent(model=llm, tools=tools, system_prompt="You are a file explorer.")
+    result = await agent.ainvoke({"messages": [HumanMessage(content="List /tmp")]})
+    print(result["messages"][-1].content)
+```
+
+### to_langchain_tools — one-shot conversion
 
 ```python
 from piai.mcp import to_langchain_tools, MCPServer
@@ -300,29 +401,8 @@ from piai.mcp import to_langchain_tools, MCPServer
 servers = [MCPServer.stdio("npx -y @modelcontextprotocol/server-filesystem /tmp")]
 tools, hub = await to_langchain_tools(servers)
 
-# Use tools in any LangChain/LangGraph agent
-from langgraph.prebuilt import create_react_agent
-from piai.langchain import PiAIChatModel
-
-llm = PiAIChatModel(model_name="gpt-5.1-codex-mini")
-agent = create_react_agent(llm, tools)
+# use tools in any LangChain/LangGraph agent
+# ...
 
 await hub.close()  # clean up when done
-```
-
-### `MCPHubToolset` — async context manager
-
-Handles connect + disconnect automatically:
-
-```python
-from piai.mcp import MCPHubToolset, MCPServer
-from langgraph.prebuilt import create_react_agent
-from piai.langchain import PiAIChatModel
-
-servers = [MCPServer.stdio("npx -y @modelcontextprotocol/server-filesystem /tmp")]
-llm = PiAIChatModel(model_name="gpt-5.1-codex-mini")
-
-async with MCPHubToolset(servers) as tools:
-    agent = create_react_agent(llm, tools)
-    result = await agent.ainvoke({"messages": [HumanMessage(content="List /tmp")]})
 ```

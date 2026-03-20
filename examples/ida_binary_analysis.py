@@ -5,6 +5,13 @@ Uses piai's native agent() loop with IDA Pro's MCP server to let the model
 autonomously reverse engineer a binary — decompile functions, trace xrefs,
 find strings, and produce a full report.
 
+Demonstrates full observability:
+  - Model reasoning (ThinkingStartEvent / ThinkingDeltaEvent / ThinkingEndEvent)
+  - Tool calls before execution (AgentToolCallEvent)
+  - Tool results after execution (AgentToolResultEvent)
+  - Per-turn summary (AgentTurnEndEvent)
+  - Streamed response text (TextDeltaEvent)
+
 Requirements:
     uv add pi-ai-py
     IDA Pro with ida-mcp plugin installed and running
@@ -26,7 +33,23 @@ import sys
 
 from piai import agent
 from piai.mcp import MCPServer
-from piai.types import Context, DoneEvent, TextContent, TextDeltaEvent, ToolCallEndEvent, UserMessage
+from piai.types import (
+    AgentToolCallEvent,
+    AgentToolResultEvent,
+    AgentTurnEndEvent,
+    Context,
+    TextDeltaEvent,
+    ThinkingDeltaEvent,
+    ThinkingEndEvent,
+    ThinkingStartEvent,
+    UserMessage,
+)
+
+DIM    = "\033[2m"
+CYAN   = "\033[36m"
+GREEN  = "\033[32m"
+YELLOW = "\033[33m"
+RESET  = "\033[0m"
 
 SYSTEM_PROMPT = """You are an expert ARM64 Android binary reverse engineer using IDA Pro.
 
@@ -49,16 +72,33 @@ Be thorough and autonomous. Use whatever IDA tools are available to get a comple
 
 
 def on_event(event):
-    if isinstance(event, ToolCallEndEvent):
-        args_preview = {
-            k: (v[:80] + "..." if isinstance(v, str) and len(v) > 80 else v)
-            for k, v in event.tool_call.input.items()
-        }
-        print(f"\n[tool] {event.tool_call.name}({args_preview})")
+    if isinstance(event, ThinkingStartEvent):
+        print(f"\n{DIM}💭 Thinking...{RESET}", flush=True)
+
+    elif isinstance(event, ThinkingDeltaEvent):
+        print(f"{DIM}{event.thinking}{RESET}", end="", flush=True)
+
+    elif isinstance(event, ThinkingEndEvent):
+        print(f"\n{DIM}[thinking done]{RESET}\n", flush=True)
+
+    elif isinstance(event, AgentToolCallEvent):
+        args_str = ", ".join(
+            f"{k}={v[:60]!r}..." if isinstance(v, str) and len(v) > 60 else f"{k}={v!r}"
+            for k, v in event.tool_input.items()
+        )
+        print(f"\n{CYAN}🔧 Turn {event.turn} → {event.tool_name}({args_str}){RESET}", flush=True)
+
+    elif isinstance(event, AgentToolResultEvent):
+        preview = event.result[:200].replace("\n", " ")
+        status = "❌" if event.error else "✅"
+        print(f"{GREEN}{status} {preview}{'...' if len(event.result) > 200 else ''}{RESET}", flush=True)
+
+    elif isinstance(event, AgentTurnEndEvent):
+        thinking_note = f", {len(event.thinking)} chars reasoning" if event.thinking else ""
+        print(f"\n{YELLOW}── Turn {event.turn}: {len(event.tool_calls)} call(s){thinking_note} ──{RESET}\n", flush=True)
+
     elif isinstance(event, TextDeltaEvent):
         print(event.text, end="", flush=True)
-    elif isinstance(event, DoneEvent):
-        print(f"\n[done: {event.reason}]")
 
 
 async def main(lib_path: str, use_http: bool = False):
@@ -89,11 +129,13 @@ async def main(lib_path: str, use_http: bool = False):
     print("\n" + "=" * 60)
     print("[*] Analysis complete.")
 
-    # Print final report if it wasn't fully streamed (e.g. hit max_turns mid-stream)
-    for block in result.content:
-        if isinstance(block, TextContent) and block.text:
-            print("\n[FINAL REPORT]\n")
-            print(block.text)
+    if result.thinking:
+        print(f"[*] Total reasoning: {len(result.thinking)} chars")
+
+    # Print final text (convenience — streaming above should have covered it)
+    if result.text:
+        print("\n[FINAL REPORT]\n")
+        print(result.text)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,8 @@ from ..types import (
     ErrorEvent,
     TextContent,
     TextDeltaEvent,
+    ThinkingDeltaEvent,
+    ThinkingEndEvent,
     Tool,
     ToolCall,
     ToolCallContent,
@@ -264,10 +266,25 @@ class PiAIChatModel(BaseChatModel):
         tc_index: dict[str, int] = {}
         # Map piai tool_call.id → truncated id safe for the API (max 64 chars)
         tc_id_map: dict[str, str] = {}
+        # Accumulate thinking blocks for this response
+        thinking_parts: list[str] = []
 
         async for event in piai_stream(self.model_name, ctx, opts, self.provider_id):
             if isinstance(event, TextDeltaEvent):
                 yield ChatGenerationChunk(message=AIMessageChunk(content=event.text))
+
+            elif isinstance(event, ThinkingDeltaEvent):
+                # Stream thinking tokens as additional_kwargs so callers can observe live
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content="",
+                        additional_kwargs={"thinking_delta": event.thinking},
+                    )
+                )
+
+            elif isinstance(event, ThinkingEndEvent):
+                # Full thinking block completed — accumulate
+                thinking_parts.append(event.thinking)
 
             elif isinstance(event, ToolCallStartEvent):
                 idx = len(tc_index)
@@ -303,8 +320,11 @@ class PiAIChatModel(BaseChatModel):
                 )
 
             elif isinstance(event, DoneEvent):
+                extra: dict[str, Any] = {}
+                if thinking_parts:
+                    extra["thinking"] = "\n\n".join(thinking_parts)
                 yield ChatGenerationChunk(
-                    message=AIMessageChunk(content=""),
+                    message=AIMessageChunk(content="", additional_kwargs=extra),
                     generation_info={"finish_reason": event.reason},
                 )
 

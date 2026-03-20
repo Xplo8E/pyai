@@ -617,7 +617,10 @@ class TestAgent:
                 on_event=async_callback,
             )
 
-        assert len(events_received) == 2
+        # TextDeltaEvent + DoneEvent + AgentTurnEndEvent (new observability event)
+        assert len(events_received) == 3
+        from piai.types import AgentTurnEndEvent
+        assert any(isinstance(e, AgentTurnEndEvent) for e in events_received)
 
 
     async def test_agent_tool_call_loop(self):

@@ -196,15 +196,19 @@ Entry point for the autonomous agentic loop.
 2. Merges MCP tools with `context.tools` (MCP takes priority on name conflicts, user tools appended de-duplicated)
 3. Runs `stream()` in a loop up to `max_turns`:
    - Collects `ToolCallEndEvent` items each turn
+   - On `DoneEvent`: saves `final_message`
    - On `ErrorEvent`: raises `RuntimeError`
-   - If no tool calls emitted: model is done, break
+   - After stream ends: collects `turn_thinking = final_message.thinking`, fires `AgentTurnEndEvent(turn, thinking, tool_calls)`
+   - If no tool calls: model is done, break
+   - For each tool call: fire `AgentToolCallEvent` → `_execute_tool()` → fire `AgentToolResultEvent`
    - Appends `AssistantMessage` + `ToolResultMessage` per tool result to context
    - Continues to next turn
 4. Returns final `AssistantMessage`
 
 **`_execute_tool(hub, tc, max_chars)`** — never raises:
-- `KeyError` (unknown tool) → returns error string
-- Any other exception → returns error string prefixed with tool name
+- `KeyError` (unknown tool) → returns `"Tool not found: ..."` string
+- Any other exception → returns `"Tool {name!r} failed: ..."` string
+- Error detection: `AgentToolResultEvent.error` is set if result starts with these prefixes
 
 **`_fire_event(callback, event)`** — supports both sync and async `on_event` callbacks via `inspect.isawaitable`.
 
@@ -279,11 +283,17 @@ Factory methods:
 - `AIMessage` with `tool_calls` → `ToolCallContent` appended to content
 - `ToolMessage` → `ToolResultMessage`
 
+**`_run_async()`** — thread-safe async dispatch:
+- If no running loop: `asyncio.run(coro)`
+- If running loop detected (LangGraph, Jupyter): dispatches to `ThreadPoolExecutor` with its own `asyncio.run()` — prevents `RuntimeError: cannot be called from a running event loop`
+
 **`_astream()`** event mapping:
 - `TextDeltaEvent` → `ChatGenerationChunk(AIMessageChunk(content=delta))`
+- `ThinkingDeltaEvent` → chunk with `additional_kwargs={"thinking_delta": delta}`
+- `ThinkingEndEvent` → accumulated into `thinking_parts` list
 - `ToolCallStartEvent` → chunk with `tool_call_chunks[{name, args:"", id, index}]`
 - `ToolCallDeltaEvent` → chunk with `tool_call_chunks[{args:delta, index}]`
-- `DoneEvent` → chunk with `generation_info={"finish_reason": reason}`
+- `DoneEvent` → final chunk with `generation_info={"finish_reason": reason}` + `additional_kwargs={"thinking": "\n\n".join(thinking_parts)}` if any thinking accumulated
 - `ErrorEvent` → raises `RuntimeError`
 
 **`bind_tools()`** uses `langchain_core.utils.function_calling.convert_to_openai_tool` to accept `BaseTool`, Pydantic models, plain functions, or dicts.

@@ -23,7 +23,7 @@ src/piai/
 ├── __init__.py              # Public exports: stream, complete, complete_text, agent, MCPServer, MCPHub + all types
 ├── types.py                 # Context, messages, stream events (all data types)
 ├── stream.py                # stream() / complete() / complete_text() entry points
-├── agent.py                 # agent() — autonomous agentic loop with MCP
+├── agent.py                 # agent() — autonomous agentic loop with MCP + observability events
 ├── cli.py                   # CLI (Click): login, logout, list, status, run
 ├── oauth/
 │   ├── __init__.py          # Provider registry + get_oauth_api_key() with auto-refresh
@@ -32,18 +32,13 @@ src/piai/
 │   ├── pkce.py              # RFC 7636 PKCE: verifier + challenge
 │   └── openai_codex.py      # ChatGPT Plus OAuth login + refresh
 ├── mcp/
-│   ├── __init__.py          # exports MCPServer, MCPClient, MCPHub
-│   ├── server.py            # MCPServer config (stdio/http/sse + from_config + from_toml)
-│   ├── client.py            # MCPClient — persistent connection to one MCP server
-│   └── hub.py               # MCPHub — manages N servers, merges tools, routes calls
-├── mcp/
 │   ├── __init__.py          # exports MCPServer, MCPClient, MCPHub, to_langchain_tools, MCPHubToolset
 │   ├── server.py            # MCPServer config (stdio/http/sse + from_config + from_toml)
 │   ├── client.py            # MCPClient — persistent connection to one MCP server
 │   ├── hub.py               # MCPHub — manages N servers, merges tools, routes calls
 │   └── langchain_tools.py   # MCP → LangChain bridge (to_langchain_tools, MCPHubToolset, MCPLangChainTool)
 ├── langchain/
-│   ├── chat_model.py        # PiAIChatModel — LangChain BaseChatModel adapter
+│   ├── chat_model.py        # PiAIChatModel — LangChain BaseChatModel adapter (surfaces thinking via additional_kwargs)
 │   └── sub_agent_tool.py    # SubAgentTool — full piai agent() as a LangChain BaseTool
 └── providers/
     ├── message_transform.py # Context → OpenAI Responses API wire format
@@ -57,12 +52,19 @@ tests/
     test_mcp.py
     test_langchain.py
     test_langgraph_integration.py
+    test_thinking.py         # thinking/observability events (34 tests)
 docs/
     architecture.md          # Design overview and flow diagrams
     internals.md             # Per-module deep-dive
-    mcp.md                   # Full MCP usage reference
+    mcp.md                   # Full MCP + observability reference
     contributing.md          # Setup and contribution guide
     AGENTS.md                # This file
+examples/
+    mcp_filesystem_agent.py          # piai native agent + MCP filesystem
+    langchain_mcp_agent.py           # PiAIChatModel + LangChain + MCP
+    radare2_binary_analysis.py       # piai agent + r2mcp binary RE
+    ida_binary_analysis.py           # piai agent + IDA Pro MCP
+    langgraph_supervisor_agent.py    # LangGraph Supervisor + SubAgentTool
 ```
 
 ---
@@ -117,6 +119,48 @@ servers = MCPServer.from_toml("~/.piai/config.toml")  # loads [mcp_servers] sect
 
 ---
 
+## Thinking / reasoning observability
+
+Reasoning models emit `ThinkingContent` blocks. piai surfaces these as stream events and convenience properties.
+
+### Stream events (from `stream()` and `agent()`)
+
+| Event | Description |
+|---|---|
+| `ThinkingStartEvent` | Model started a reasoning block |
+| `ThinkingDeltaEvent(thinking: str)` | Incremental reasoning chunk |
+| `ThinkingEndEvent(thinking: str)` | Block done — `thinking` is always the full accumulated text |
+| `AgentToolCallEvent(turn, tool_name, tool_input)` | Fired just before a tool is executed |
+| `AgentToolResultEvent(turn, tool_name, tool_input, result, error)` | Fired after tool execution |
+| `AgentTurnEndEvent(turn, thinking, tool_calls)` | End of each agent loop turn |
+
+### AssistantMessage properties
+
+```python
+result = await agent(...)
+result.text       # str — concatenated TextContent blocks
+result.thinking   # str | None — concatenated ThinkingContent blocks, None if no reasoning
+```
+
+### How _StreamProcessor handles reasoning
+
+- `response.output_item.added` with `type="reasoning"` → emit `ThinkingStartEvent`
+- `response.reasoning_summary_text.delta` → accumulate delta, emit `ThinkingDeltaEvent`
+- `response.reasoning_summary_part.done` → append `"\n\n"` separator
+- `response.output_item.done` with `type="reasoning"` → reconstruct full text from summary parts, append `ThinkingContent` to message, emit `ThinkingEndEvent(thinking=full_text)`
+
+> Backend sometimes skips streaming deltas for short reasoning — `ThinkingEndEvent.thinking` is always authoritative.
+
+### LangChain thinking surfacing
+
+`PiAIChatModel._astream` accumulates thinking and surfaces it via `additional_kwargs`:
+
+- `ThinkingDeltaEvent` → `AIMessageChunk(additional_kwargs={"thinking_delta": delta})`
+- `ThinkingEndEvent` → accumulated in `thinking_parts`
+- `DoneEvent` → final chunk gets `additional_kwargs={"thinking": "\n\n".join(thinking_parts)}`
+
+---
+
 ## LangChain integration
 
 `PiAIChatModel` is a drop-in LangChain `BaseChatModel` backed by piai:
@@ -125,11 +169,13 @@ servers = MCPServer.from_toml("~/.piai/config.toml")  # loads [mcp_servers] sect
 from piai.langchain import PiAIChatModel
 from langchain_core.messages import HumanMessage
 
-llm = PiAIChatModel(model_name="gpt-5.1-codex-mini")
+llm = PiAIChatModel(model_name="gpt-5.1-codex-mini", options={"reasoning_effort": "medium"})
 result = llm.invoke([HumanMessage(content="What is 2+2?")])
+print(result.content)
+# model reasoning in: result.additional_kwargs.get("thinking")
 ```
 
-Supports `invoke`, `ainvoke`, `stream`, `astream`, `bind_tools`.
+Supports `invoke`, `ainvoke`, `stream`, `astream`, `bind_tools`. Thinking is surfaced via `additional_kwargs["thinking"]` on the final message and `additional_kwargs["thinking_delta"]` on streaming chunks.
 
 ---
 
@@ -146,7 +192,9 @@ Supports `invoke`, `ainvoke`, `stream`, `astream`, `bind_tools`.
 9. **SSE CRLF normalization** — `_parse_sse` normalizes `\r\n` and `\r` to `\n` before splitting events.
 10. **Options dict not mutated** — `stream()` copies `options` before calling `opts.pop("base_url", None)` to avoid mutating the caller's dict.
 11. **MCP tool merge order** — MCP tools take priority; user-defined `context.tools` are appended de-duplicated by name.
-12. **`asyncio.get_running_loop()`** — OAuth code uses `get_running_loop()` (not the deprecated `get_event_loop()`).
+12. **`asyncio.get_running_loop()`** — All async dispatch uses `get_running_loop()` (not the deprecated `get_event_loop()`). When already inside a running loop (LangGraph, Jupyter), dispatch to a thread with its own `asyncio.run()`.
+13. **`ThinkingEndEvent.thinking` is authoritative** — Backend may skip `ThinkingDeltaEvent` deltas for short reasoning blocks. Always use `ThinkingEndEvent.thinking` (reconstructed from summary parts) as the canonical full text.
+14. **`AssistantMessage.thinking` returns `None` not `""`** — When no ThinkingContent blocks are present. Callers check `if result.thinking:` not `if result.thinking is not None:`.
 
 ---
 
@@ -158,18 +206,25 @@ Supports `invoke`, `ainvoke`, `stream`, `astream`, `bind_tools`.
 
 # Quick count
 .venv/bin/python -m pytest tests/ -q
+
+# With coverage
+.venv/bin/python -m pytest tests/ --cov=src/piai --cov-report=term-missing
 ```
 
 Test files and what they cover:
-| File | Coverage |
-|------|----------|
-| `test_pkce.py` | PKCE verifier/challenge generation |
-| `test_oauth_codex.py` | JWT decoding, auth URL, credential serialization |
-| `test_message_transform.py` | Context → Responses API conversion, `_clamp_reasoning_effort`, `_make_tc_id` |
-| `test_stream_processor.py` | `_StreamProcessor` state machine (text, tool calls, thinking, errors, edge cases) |
-| `test_sse_parser.py` | SSE parser (CRLF normalization, split chunks, multi-event, invalid JSON) |
-| `test_mcp.py` | MCPServer config, MCPClient, MCPHub, agent loop |
-| `test_langchain.py` | PiAIChatModel, message conversion, streaming, bind_tools |
+| File | Tests | Coverage |
+|------|-------|----------|
+| `test_pkce.py` | — | PKCE verifier/challenge generation |
+| `test_oauth_codex.py` | — | JWT decoding, auth URL, credential serialization |
+| `test_message_transform.py` | — | Context → Responses API conversion, `_clamp_reasoning_effort`, `_make_tc_id` |
+| `test_stream_processor.py` | — | `_StreamProcessor` state machine (text, tool calls, thinking, errors, edge cases) |
+| `test_sse_parser.py` | — | SSE parser (CRLF normalization, split chunks, multi-event, invalid JSON) |
+| `test_mcp.py` | — | MCPServer config, MCPClient, MCPHub, agent loop, `AgentTurnEndEvent` |
+| `test_langchain.py` | — | PiAIChatModel, message conversion, streaming, bind_tools |
+| `test_langgraph_integration.py` | — | MCP bridge, SubAgentTool, schema generation, MCPHubToolset |
+| `test_thinking.py` | 34 | `AssistantMessage.text/thinking`, all new event types, agent observability, LangChain thinking surfacing, edge paths |
+
+**Total: 257 tests**
 
 ---
 
@@ -207,6 +262,20 @@ options = {
 ---
 
 ## Changelog
+
+### 2026-03-20 — Thinking/reasoning observability
+- **New** `ThinkingStartEvent`, `ThinkingEndEvent(thinking: str)` in `types.py` — bracket reasoning blocks; `ThinkingEndEvent.thinking` always has full text
+- **New** `AgentToolCallEvent(turn, tool_name, tool_input)` — fired just before `_execute_tool()` in `agent.py`
+- **New** `AgentToolResultEvent(turn, tool_name, tool_input, result, error)` — fired after `_execute_tool()`
+- **New** `AgentTurnEndEvent(turn, thinking, tool_calls)` — fired at end of each loop turn
+- **New** `AssistantMessage.text` property — concatenates all `TextContent` blocks
+- **New** `AssistantMessage.thinking` property — concatenates all `ThinkingContent` blocks, returns `None` (not `""`) when absent
+- **Fix** `providers/openai_codex.py`: emit `ThinkingStartEvent` when reasoning block opens, `ThinkingEndEvent` with full reconstructed text when it closes
+- **Fix** `langchain/chat_model.py`: thinking surfaced via `additional_kwargs["thinking_delta"]` on stream chunks and `additional_kwargs["thinking"]` on final message
+- **Fix** `langchain/sub_agent_tool.py`: `_run()` uses `get_running_loop()` + thread dispatch, not deprecated `asyncio.get_event_loop().run_until_complete()`
+- **Examples** All 5 examples updated with full ANSI-colored observability: thinking, tool calls, results, turn summaries
+- **Tests** Added `test_thinking.py` (34 tests): full coverage of new events + edge paths
+- **Total tests:** 257
 
 ### 2026-03-20 — LangGraph integration
 - **New** `src/piai/mcp/langchain_tools.py`: MCP → LangChain tool bridge

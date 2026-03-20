@@ -80,6 +80,25 @@ class AssistantMessage:
         "cost": {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0, "total": 0.0},
     })
 
+    @property
+    def text(self) -> str:
+        """Concatenated text response (convenience accessor)."""
+        return "".join(
+            block.text for block in self.content if isinstance(block, TextContent)
+        )
+
+    @property
+    def thinking(self) -> str | None:
+        """
+        Full reasoning/thinking text if the model emitted any, else None.
+
+        Concatenates all ThinkingContent blocks in order. Returns None (not "")
+        when the model produced no thinking output at all, so callers can
+        distinguish "thought nothing" from "thinking not supported".
+        """
+        parts = [block.thinking for block in self.content if isinstance(block, ThinkingContent)]
+        return "\n\n".join(parts) if parts else None
+
 
 Message = UserMessage | AssistantMessage | ToolResultMessage
 
@@ -142,9 +161,20 @@ class TextEndEvent:
 
 
 @dataclass
+class ThinkingStartEvent:
+    type: Literal["thinking_start"] = "thinking_start"
+
+
+@dataclass
 class ThinkingDeltaEvent:
     type: Literal["thinking_delta"] = "thinking_delta"
     thinking: str = ""
+
+
+@dataclass
+class ThinkingEndEvent:
+    type: Literal["thinking_end"] = "thinking_end"
+    thinking: str = ""  # full accumulated thinking text for this block
 
 
 @dataclass
@@ -167,6 +197,35 @@ class ToolCallEndEvent:
 
 
 @dataclass
+class AgentToolCallEvent:
+    """Fired just before agent() executes a tool call — gives visibility into what the model decided to do."""
+    type: Literal["agent_tool_call"] = "agent_tool_call"
+    turn: int = 0
+    tool_name: str = ""
+    tool_input: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AgentToolResultEvent:
+    """Fired after agent() receives the tool result — gives visibility into what the tool returned."""
+    type: Literal["agent_tool_result"] = "agent_tool_result"
+    turn: int = 0
+    tool_name: str = ""
+    tool_input: dict[str, Any] = field(default_factory=dict)
+    result: str = ""
+    error: bool = False
+
+
+@dataclass
+class AgentTurnEndEvent:
+    """Fired at the end of each agent loop turn with a summary of what happened."""
+    type: Literal["agent_turn_end"] = "agent_turn_end"
+    turn: int = 0
+    thinking: str | None = None   # full thinking text for this turn (if any)
+    tool_calls: list[ToolCall] = field(default_factory=list)
+
+
+@dataclass
 class DoneEvent:
     type: Literal["done"] = "done"
     reason: str = "stop"
@@ -184,10 +243,15 @@ StreamEvent = (
     TextStartEvent
     | TextDeltaEvent
     | TextEndEvent
+    | ThinkingStartEvent
     | ThinkingDeltaEvent
+    | ThinkingEndEvent
     | ToolCallStartEvent
     | ToolCallDeltaEvent
     | ToolCallEndEvent
+    | AgentToolCallEvent
+    | AgentToolResultEvent
+    | AgentTurnEndEvent
     | DoneEvent
     | ErrorEvent
 )
