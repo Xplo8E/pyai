@@ -511,6 +511,9 @@ def _friendly_error(status: int, body: str) -> str:
     return body or f"HTTP {status}"
 
 
+# Usage fetching has moved to piai.usage.openai_codex — see that module.
+
+
 # ------------------------------------------------------------------ #
 # Main stream function                                                #
 # ------------------------------------------------------------------ #

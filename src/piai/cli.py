@@ -156,6 +156,50 @@ def status():
 
 
 # ------------------------------------------------------------------ #
+# usage                                                               #
+# ------------------------------------------------------------------ #
+
+
+@cli.command()
+@click.argument("provider", default="openai-codex")
+@click.option("--raw", is_flag=True, help="Dump raw API responses as JSON")
+def usage(provider: str, raw: bool):
+    """Show usage limits and quota reset times for a provider."""
+    asyncio.run(_do_usage(provider, raw))
+
+
+async def _do_usage(provider_id: str, raw: bool):
+    import json as _json
+    from .oauth.storage import get_provider_credentials, save_credentials
+    from .oauth import get_oauth_provider
+    from .usage import get_provider_usage, render
+
+    creds = get_provider_credentials(provider_id)
+    if creds is None:
+        click.echo(f"Not logged in for provider: {provider_id}. Run: piai login {provider_id}", err=True)
+        sys.exit(1)
+
+    # Auto-refresh if expired
+    if creds.is_expired():
+        p = get_oauth_provider(provider_id)
+        if p is not None:
+            try:
+                creds = await p.refresh_token(creds)
+                save_credentials(provider_id, creds)
+            except Exception as e:
+                click.echo(f"Token refresh failed: {e}", err=True)
+                sys.exit(1)
+
+    report = await get_provider_usage(provider_id, creds)
+
+    if raw:
+        click.echo(_json.dumps(report.raw, indent=2))
+        return
+
+    render(report)
+
+
+# ------------------------------------------------------------------ #
 # run (quick test)                                                    #
 # ------------------------------------------------------------------ #
 
