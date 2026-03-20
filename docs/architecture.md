@@ -29,11 +29,19 @@ User code
   │       │     ├── MCPClient(server2).connect()
   │       │     └── discover + merge all tools
   │       │
-  │       └── loop: stream() → tool calls → MCPHub.call_tool() → ToolResultMessage → repeat
+  │       └── loop:
+  │             stream() → ThinkingStartEvent / ThinkingDeltaEvent / ThinkingEndEvent
+  │                      → TextDeltaEvent / ToolCallEndEvent
+  │                      → fire AgentToolCallEvent
+  │                      → MCPHub.call_tool() → ToolResultMessage
+  │                      → fire AgentToolResultEvent
+  │                      → fire AgentTurnEndEvent
+  │                      → repeat until no tool calls → return AssistantMessage
   │
   ├── PiAIChatModel                              [langchain/chat_model.py]
   │       │
-  │       └── wraps piai_stream() as LangChain BaseChatModel
+  │       ├── wraps piai_stream() as LangChain BaseChatModel
+  │       └── surfaces thinking via additional_kwargs["thinking"] / ["thinking_delta"]
   │
   └── CLI (piai login/run/status/...)            [cli.py]
           │
@@ -61,12 +69,14 @@ src/piai/
 │   ├── pkce.py              # PKCE verifier + challenge (RFC 7636)
 │   └── openai_codex.py      # ChatGPT Plus OAuth login + token refresh
 ├── mcp/
-│   ├── __init__.py          # Exports MCPServer, MCPClient, MCPHub
+│   ├── __init__.py          # Exports MCPServer, MCPClient, MCPHub, to_langchain_tools, MCPHubToolset
 │   ├── server.py            # MCPServer config dataclass (stdio/http/sse factories)
 │   ├── client.py            # MCPClient — persistent session per MCP server
-│   └── hub.py               # MCPHub — multi-server manager
+│   ├── hub.py               # MCPHub — multi-server manager
+│   └── langchain_tools.py   # MCP → LangChain bridge (MCPHubToolset, MCPLangChainTool)
 ├── langchain/
-│   └── chat_model.py        # PiAIChatModel — LangChain BaseChatModel adapter
+│   ├── chat_model.py        # PiAIChatModel — LangChain BaseChatModel adapter
+│   └── sub_agent_tool.py    # SubAgentTool — piai agent() as a LangChain BaseTool
 └── providers/
     ├── message_transform.py # Context → OpenAI Responses API format
     └── openai_codex.py      # SSE streaming to chatgpt.com/backend-api
@@ -110,8 +120,18 @@ If two servers expose the same tool name, **both** are namespaced: `s1__tool_nam
 ### Tool merging in agent()
 `agent()` merges MCP-discovered tools with any pre-existing `context.tools`. MCP tools take priority on name conflicts (de-duplicated by name). This allows users to pass fallback tools in the context that coexist with MCP tools.
 
+### Thinking / reasoning observability
+The SSE stream emits reasoning as a separate `reasoning` output item. `_StreamProcessor` tracks this just like text blocks:
+- `response.output_item.added` (type=reasoning) → emit `ThinkingStartEvent`
+- `response.reasoning_summary_text.delta` → emit `ThinkingDeltaEvent`, accumulate in `current_block["thinking"]`
+- `response.output_item.done` (type=reasoning) → reconstruct from summary parts, append `ThinkingContent` to message, emit `ThinkingEndEvent(thinking=full_text)`
+
+`agent.py` fires three additional events per turn: `AgentToolCallEvent` (before tool execution), `AgentToolResultEvent` (after), `AgentTurnEndEvent` (turn summary with thinking + tool calls list).
+
+`AssistantMessage.text` and `AssistantMessage.thinking` are convenience properties that concatenate content blocks. `thinking` returns `None` (not `""`) when no reasoning was emitted — callers use `if result.thinking:` to check.
+
 ### LangChain adapter
-`PiAIChatModel` converts LangChain message types to piai types and back. The sync `_generate` / `_stream` methods use `asyncio.run()` (standard LangChain pattern). For Jupyter/async use, call `ainvoke` / `astream` directly.
+`PiAIChatModel` converts LangChain message types to piai types and back. The sync `_generate` / `_stream` methods use a thread-safe `_run_async()` helper that detects whether an event loop is already running (LangGraph, Jupyter) and dispatches to a fresh thread if so. Thinking is surfaced via `additional_kwargs["thinking_delta"]` on streaming chunks and `additional_kwargs["thinking"]` on the final message.
 
 ---
 
