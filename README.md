@@ -601,6 +601,38 @@ PIAI_AUTH=/path/to/project/auth.json python my_script.py
 
 ---
 
+## Use piai as an MCP server
+
+`mcp_server.py` in the project root exposes piai's `complete_text()` as an MCP tool — so any MCP-compatible client (Claude Code, Cursor, Windsurf) can query ChatGPT Plus through your subscription.
+
+**Register in Claude Code** (`~/.claude/claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "piai": {
+      "command": "/path/to/.venv/bin/python",
+      "args": ["/path/to/piai/mcp_server.py"]
+    }
+  }
+}
+```
+
+**Register in Cursor / Windsurf** (MCP settings, same format).
+
+**Run standalone:**
+```bash
+python mcp_server.py
+```
+
+Once registered, the `complete` tool is available in your editor — pass any query and optionally a model ID:
+```
+complete(query="Explain ROP chains", model="gpt-5.1")
+```
+
+Available models: `gpt-5.1-codex-mini` (default), `gpt-5.1`, `gpt-5.1-codex-max`, `gpt-5.2`, `gpt-5.2-codex`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.4`
+
+---
+
 ## Project structure
 
 ```
