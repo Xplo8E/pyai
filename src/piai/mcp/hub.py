@@ -75,9 +75,16 @@ class MCPHub:
         # piai Tool objects (merged, namespaced if collision)
         self._tools: list[Tool] = []
         self._connected = False
+        # Prevents double-initialization if connect() is called concurrently
+        self._connect_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         """Connect to all servers concurrently and discover their tools."""
+        async with self._connect_lock:
+            await self._connect_inner()
+
+    async def _connect_inner(self) -> None:
+        """Guarded connect — must only be called while holding _connect_lock."""
         if self._connected:
             return
 
@@ -155,7 +162,8 @@ class MCPHub:
             existing_server_name = _safe_name(existing_client.server.name or "server")
             existing_namespaced = f"{existing_server_name}__{tool.name}"
 
-            # Re-register the existing tool under its namespaced name too
+            # Re-register the existing tool under its namespaced name and remove the
+            # ambiguous original-name entry so the model only sees namespaced names.
             if existing_namespaced not in self._tool_registry:
                 self._tool_registry[existing_namespaced] = (existing_client, existing_original)
                 # Find and update the tool entry in _tools
@@ -167,8 +175,9 @@ class MCPHub:
                             parameters=t.parameters,
                         )
                         break
-                # Keep original name pointing to first server for backward compat
-                # (don't remove it — first-wins for unambiguous use)
+                # Remove the unnamespaced key — it's now ambiguous and would silently
+                # route to the first server even though the model won't see the name.
+                del self._tool_registry[tool.name]
 
         logger.warning(
             "Tool name collision: %r exists from %s. "
@@ -191,8 +200,8 @@ class MCPHub:
         return list(self._tools)
 
     def tool_names(self) -> list[str]:
-        """Return just the tool names."""
-        return [t.name for t in self._tools]
+        """Return registered tool names (keys in _tool_registry, used for executor coverage checks)."""
+        return list(self._tool_registry.keys())
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """
@@ -200,11 +209,15 @@ class MCPHub:
 
         Args:
             name:      Tool name (possibly namespaced, e.g. "ida__decompile")
-            arguments: Tool arguments dict
+            arguments: Tool arguments dict (None is normalized to {})
 
         Raises:
             KeyError:    If tool name not found in any connected server.
         """
+        # Normalize None/non-dict arguments — MCP SDK requires a dict
+        if not isinstance(arguments, dict):
+            arguments = {}
+
         entry = self._tool_registry.get(name)
         if entry is None:
             available = list(self._tool_registry.keys())

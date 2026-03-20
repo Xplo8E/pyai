@@ -184,12 +184,13 @@ def build_request_body(
         "input": messages,
         "text": {"verbosity": opts.get("text_verbosity", "medium")},
         "include": ["reasoning.encrypted_content"],
-        "tool_choice": "auto",
-        "parallel_tool_calls": True,
     }
 
     if context.tools:
         body["tools"] = convert_tools(context.tools)
+        # Allow callers to override tool_choice (e.g. "required", {"type": "function", "name": "..."})
+        body["tool_choice"] = opts.get("tool_choice", "auto")
+        body["parallel_tool_calls"] = True
 
     if opts.get("session_id"):
         body["prompt_cache_key"] = opts["session_id"]

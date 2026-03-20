@@ -392,26 +392,28 @@ class TestAgentEdgePaths:
 
     @pytest.mark.asyncio
     async def test_execute_tool_with_no_hub_returns_message(self):
-        """_execute_tool returns error string when hub is None (no MCP servers)."""
+        """_execute_tool returns (error_string, True) when hub is None (no MCP servers)."""
         from piai.agent import _execute_tool
 
         tc = ToolCall(id="x", name="my_tool", input={})
-        result = await _execute_tool(None, tc, 1000)
+        result, is_error = await _execute_tool(None, tc, 1000)
         assert "my_tool" in result
         assert "No MCP servers" in result
+        assert is_error is True
 
     @pytest.mark.asyncio
     async def test_execute_tool_generic_exception(self):
-        """_execute_tool catches generic Exception and returns error string."""
+        """_execute_tool catches generic Exception and returns (error_string, True)."""
         from piai.agent import _execute_tool
 
         hub = MagicMock()
         hub.call_tool = AsyncMock(side_effect=ValueError("unexpected"))
 
         tc = ToolCall(id="x", name="boom", input={})
-        result = await _execute_tool(hub, tc, 1000)
+        result, is_error = await _execute_tool(hub, tc, 1000)
         assert "boom" in result
         assert "failed" in result
+        assert is_error is True
 
 
 # ─── chat_model coverage: sync _stream + AIMessage list content ───────────────

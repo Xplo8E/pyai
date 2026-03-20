@@ -93,7 +93,7 @@ def _lc_messages_to_piai(messages: list[BaseMessage]) -> Context:
                     blocks.append(TextContent(text=text))
             if msg.tool_calls:
                 tcs = [
-                    ToolCall(id=tc["id"], name=tc["name"], input=tc["args"])
+                    ToolCall(id=tc["id"], name=tc["name"], input=tc["args"] or {})
                     for tc in msg.tool_calls
                 ]
                 blocks.append(ToolCallContent(tool_calls=tcs))
@@ -262,6 +262,11 @@ class PiAIChatModel(BaseChatModel):
         if "options" in kwargs:
             opts.update(kwargs["options"])
 
+        # Forward tool_choice from bind_tools() into the request options
+        raw_tool_choice = kwargs.get("tool_choice")
+        if raw_tool_choice:
+            opts["tool_choice"] = raw_tool_choice
+
         # Track tool call index for LangChain chunk merging
         tc_index: dict[str, int] = {}
         # Map piai tool_call.id → truncated id safe for the API (max 64 chars)
@@ -316,6 +321,27 @@ class PiAIChatModel(BaseChatModel):
                             "index": idx,
                             "type": "tool_call_chunk",
                         }],
+                    )
+                )
+
+            elif isinstance(event, ToolCallEndEvent):
+                # Emit a final chunk with the canonical parsed args from the done event.
+                # This cross-checks the accumulated delta JSON and handles the edge case
+                # where the last delta was empty or missing.
+                idx = tc_index.get(event.tool_call.id, 0)
+                import json as _json
+                canonical_args = _json.dumps(event.tool_call.input or {})
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content="",
+                        tool_call_chunks=[{
+                            "name": None,
+                            "args": "",  # Already accumulated via deltas; this is a no-op for merging
+                            "id": None,
+                            "index": idx,
+                            "type": "tool_call_chunk",
+                        }],
+                        additional_kwargs={"tool_call_args_canonical": {event.tool_call.id: canonical_args}},
                     )
                 )
 

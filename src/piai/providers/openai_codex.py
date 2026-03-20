@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import platform
 import re
 import time
 from collections.abc import AsyncGenerator
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import httpx
 
@@ -426,7 +429,13 @@ class _StreamProcessor:
                         args_str = self._current_block["args"]
                     try:
                         input_dict = json.loads(args_str) if args_str else {}
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as _exc:
+                        logger.warning(
+                            "Tool %r: failed to parse arguments JSON %r: %s. Using {}.",
+                            name or (self._current_block or {}).get("name", "?"),
+                            args_str,
+                            _exc,
+                        )
                         input_dict = {}
 
                     call_id = item.get("call_id", "")

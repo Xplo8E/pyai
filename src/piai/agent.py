@@ -175,6 +175,20 @@ async def _run_loop(
             tools=context.tools,
         )
 
+    # Warn if any tool is visible to the model but has no executor.
+    # Tools are executable if they are in local_handlers OR discoverable via the hub.
+    if ctx.tools:
+        handled = set(local_handlers.keys()) if local_handlers else set()
+        hub_names = set(hub.tool_names()) if hub is not None else set()
+        unexecutable = [t.name for t in ctx.tools if t.name not in handled and t.name not in hub_names]
+        if unexecutable:
+            logger.warning(
+                "Tools visible to model but have no executor (not in local_handlers and not in MCP): %s. "
+                "The model may call these tools and receive 'Tool not found' errors. "
+                "Pass mcp_servers or local_handlers to handle them.",
+                unexecutable,
+            )
+
     opts = dict(options or {})
     final_message: AssistantMessage | None = None
 
@@ -223,16 +237,15 @@ async def _run_loop(
             await _fire_event(on_event, AgentToolCallEvent(
                 turn=turn + 1,
                 tool_name=tc.name,
-                tool_input=tc.input,
+                tool_input=tc.input or {},
             ))
 
-            result = await _execute_tool(hub, tc, tool_result_max_chars, local_handlers)
-            is_error = result.startswith(("Tool not found:", f"Tool {tc.name!r} failed:"))
+            result, is_error = await _execute_tool(hub, tc, tool_result_max_chars, local_handlers)
 
             await _fire_event(on_event, AgentToolResultEvent(
                 turn=turn + 1,
                 tool_name=tc.name,
-                tool_input=tc.input,
+                tool_input=tc.input or {},
                 result=result,
                 error=is_error,
             ))
@@ -267,42 +280,58 @@ async def _execute_tool(
     tc: ToolCall,
     max_chars: int,
     local_handlers: dict[str, Callable[..., Any]] | None = None,
-) -> str:
-    """Execute a tool call and return result string. Never raises.
+) -> tuple[str, bool]:
+    """Execute a tool call and return (result_string, is_error). Never raises.
+
+    Returns a tuple so callers get a structured error flag instead of relying on
+    fragile string-prefix detection.
 
     local_handlers: optional dict of tool_name -> callable for tools that
     should be handled locally rather than forwarded to an MCP server.
     Callables may be sync or async; they receive the tool input dict as kwargs.
+    local_handlers take priority over MCP when names conflict.
     """
-    # Check local handlers first
+    # Normalise input — always pass a dict, never None or other falsy types
+    input_args: dict[str, Any] = tc.input if isinstance(tc.input, dict) else {}
+
+    # Check local handlers first (takes priority over MCP on name collision)
     if local_handlers and tc.name in local_handlers:
         handler = local_handlers[tc.name]
+        if hub is not None and tc.name in hub.tool_names():
+            logger.debug(
+                "Tool %r has both a local_handler and an MCP entry; local_handler wins.",
+                tc.name,
+            )
         try:
-            result = handler(**tc.input) if tc.input else handler()
+            result = handler(**input_args)
             if inspect.isawaitable(result):
                 result = await result
-            return str(result) if result is not None else "ok"
+            return (str(result) if result is not None else "ok", False)
         except Exception as e:
             msg = f"Tool {tc.name!r} failed: {e}"
             logger.warning(msg)
-            return msg
+            return (msg, True)
 
     if hub is None:
-        return f"No MCP servers configured — cannot execute tool {tc.name!r}."
+        msg = f"No MCP servers configured — cannot execute tool {tc.name!r}."
+        logger.warning(msg)
+        return (msg, True)
 
-    logger.debug("Calling tool %r with args: %s", tc.name, tc.input)
+    logger.debug("Calling tool %r with args: %s", tc.name, input_args)
     try:
-        result = await hub.call_tool(tc.name, tc.input)
+        result = await hub.call_tool(tc.name, input_args)
         logger.debug("Tool %r returned %d chars", tc.name, len(result))
-        return result
+        # MCP tool errors are returned as "Tool error: ..." strings from MCPClient
+        is_error = result.startswith("Tool error:")
+        return (result, is_error)
     except KeyError as e:
         msg = f"Tool not found: {e}"
         logger.warning(msg)
-        return msg
+        return (msg, True)
     except Exception as e:
         msg = f"Tool {tc.name!r} failed: {e}"
         logger.warning(msg)
-        return msg
+        return (msg, True)
 
 
 async def _fire_event(
