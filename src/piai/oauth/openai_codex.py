@@ -124,6 +124,42 @@ def extract_account_id(access_token: str) -> str:
 # ------------------------------------------------------------------ #
 
 
+def _make_handler(callback_server: "_CallbackServer") -> type:
+    """Return a BaseHTTPRequestHandler subclass bound to the given callback server."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            if parsed.path != "/auth/callback":
+                self._send(404, "Not found")
+                return
+            params = parse_qs(parsed.query)
+            state = params.get("state", [None])[0]
+            if state != callback_server._expected_state:
+                self._send(400, "State mismatch")
+                return
+            code = params.get("code", [None])[0]
+            if not code:
+                self._send(400, "Missing authorization code")
+                return
+            self._send(200, SUCCESS_HTML, "text/html; charset=utf-8")
+            callback_server._received_code = code
+            callback_server._code_event.set()
+
+        def _send(self, status: int, body: str, content_type: str = "text/plain"):
+            encoded = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, *args):
+            pass  # silence access logs
+
+    return Handler
+
+
 class _CallbackServer:
     """
     Minimal HTTP server that listens on localhost:1455 for the OAuth redirect.
@@ -140,40 +176,8 @@ class _CallbackServer:
 
     def start(self) -> bool:
         """Start server. Returns False if port is already in use (fallback to manual paste)."""
-        parent = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                parsed = urlparse(self.path)
-                if parsed.path != "/auth/callback":
-                    self._send(404, "Not found")
-                    return
-                params = parse_qs(parsed.query)
-                state = params.get("state", [None])[0]
-                if state != parent._expected_state:
-                    self._send(400, "State mismatch")
-                    return
-                code = params.get("code", [None])[0]
-                if not code:
-                    self._send(400, "Missing authorization code")
-                    return
-                self._send(200, SUCCESS_HTML, "text/html; charset=utf-8")
-                parent._received_code = code
-                parent._code_event.set()
-
-            def _send(self, status: int, body: str, content_type: str = "text/plain"):
-                encoded = body.encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(encoded)))
-                self.end_headers()
-                self.wfile.write(encoded)
-
-            def log_message(self, *args):
-                pass  # silence access logs
-
         try:
-            self._server = HTTPServer(("127.0.0.1", CALLBACK_PORT), Handler)
+            self._server = HTTPServer(("127.0.0.1", CALLBACK_PORT), _make_handler(self))
         except OSError:
             # Port in use — JS falls back to manual paste
             return False
@@ -331,6 +335,33 @@ def _build_credentials(token_data: dict) -> OAuthCredentials:
 
 
 # ------------------------------------------------------------------ #
+# Login helpers                                                       #
+# ------------------------------------------------------------------ #
+
+
+def _wait_browser_code(
+    server: "_CallbackServer",
+    browser_future: "asyncio.Future",
+    loop: "asyncio.AbstractEventLoop",
+) -> None:
+    """Thread target: wait for the browser OAuth callback and resolve the future."""
+    result = server.wait_for_code()
+    if not browser_future.done():
+        loop.call_soon_threadsafe(browser_future.set_result, result)
+
+
+async def _resolve_manual_future(on_manual_code_input, manual_future: "asyncio.Future") -> None:
+    """Coroutine: await manual code input and resolve the future."""
+    try:
+        result = await on_manual_code_input()
+        if not manual_future.done():
+            manual_future.set_result(result)
+    except Exception as e:
+        if not manual_future.done():
+            manual_future.set_exception(e)
+
+
+# ------------------------------------------------------------------ #
 # Public login / refresh functions                                    #
 # ------------------------------------------------------------------ #
 
@@ -367,24 +398,14 @@ async def login_openai_codex(
                 manual_future: asyncio.Future = loop.create_future()
                 browser_future: asyncio.Future = loop.create_future()
 
-                def _wait_browser():
-                    result = server.wait_for_code()
-                    if not browser_future.done():
-                        loop.call_soon_threadsafe(browser_future.set_result, result)
-
-                browser_thread = threading.Thread(target=_wait_browser, daemon=True)
+                browser_thread = threading.Thread(
+                    target=_wait_browser_code,
+                    args=(server, browser_future, loop),
+                    daemon=True,
+                )
                 browser_thread.start()
 
-                async def _get_manual():
-                    try:
-                        result = await on_manual_code_input()
-                        if not manual_future.done():
-                            manual_future.set_result(result)
-                    except Exception as e:
-                        if not manual_future.done():
-                            manual_future.set_exception(e)
-
-                asyncio.ensure_future(_get_manual())
+                asyncio.ensure_future(_resolve_manual_future(on_manual_code_input, manual_future))
 
                 done, _ = await asyncio.wait(
                     [browser_future, manual_future],

@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import os
 import shlex
+import tomllib
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -122,7 +125,6 @@ class MCPServer:
             MCPServer.http("https://api.example.com/mcp", bearer_token="my-token")
             MCPServer.http("https://api.example.com/mcp", headers={"X-Api-Key": "abc"})
         """
-        from urllib.parse import urlparse
         hostname = urlparse(url).hostname or url
 
         hdrs: dict[str, str] = dict(headers or {})
@@ -154,7 +156,6 @@ class MCPServer:
             headers:      Optional HTTP headers dict.
             bearer_token: Shorthand for Authorization: Bearer <token> header.
         """
-        from urllib.parse import urlparse
         hostname = urlparse(url).hostname or url
 
         hdrs: dict[str, str] = dict(headers or {})
@@ -234,7 +235,6 @@ class MCPServer:
             if not url:
                 raise ValueError(f"{transport} server config must have 'url'")
 
-            from urllib.parse import urlparse
             hostname = urlparse(url).hostname or url
 
             hdrs: dict[str, str] = dict(config.get("headers") or {})
@@ -292,9 +292,6 @@ class MCPServer:
             servers = MCPServer.from_toml("~/.piai/config.toml")
             result = await agent(model_id="gpt-5.1-codex-mini", context=ctx, mcp_servers=servers)
         """
-        import tomllib
-        from pathlib import Path
-
         resolved = Path(path).expanduser()
         if not resolved.exists():
             raise FileNotFoundError(f"piai config not found: {resolved}")

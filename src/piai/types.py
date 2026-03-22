@@ -132,10 +132,16 @@ class Context:
     Serializable conversation context.
 
     Mirrors Context type from types.ts.
+
+    scratchpad is a key-value store for agent "working memory". It persists across
+    turns but is automatically injected into the system prompt on every LLM call,
+    so the model always sees it — even when the message history is heavily compressed
+    or pruned. Update it via local_handlers or context_reducer to track important state.
     """
     messages: list[Message] = field(default_factory=list)
     system_prompt: str | None = None
     tools: list[Tool] | None = None
+    scratchpad: dict[str, Any] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------ #
@@ -223,6 +229,7 @@ class AgentTurnEndEvent:
     turn: int = 0
     thinking: str | None = None   # full thinking text for this turn (if any)
     tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: dict[str, Any] = field(default_factory=dict)  # token counts from the model response
 
 
 @dataclass

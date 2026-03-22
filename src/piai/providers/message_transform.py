@@ -172,15 +172,25 @@ def build_request_body(
     Build the full JSON body for POST /codex/responses.
 
     Mirrors buildRequestBody() from openai-codex-responses.ts.
+
+    If context.scratchpad is non-empty, it is serialized as JSON and appended
+    to the instructions (system prompt) inside a <scratchpad> block. This ensures
+    the model always sees important working-memory state regardless of how much
+    the message history has been compressed.
     """
     opts = options or {}
     messages = convert_messages(context)
+
+    instructions = context.system_prompt or "You are a helpful assistant."
+    if context.scratchpad:
+        scratchpad_json = json.dumps(context.scratchpad, indent=2)
+        instructions = f"{instructions}\n\n<scratchpad>\n{scratchpad_json}\n</scratchpad>"
 
     body: dict[str, Any] = {
         "model": model_id,
         "store": False,
         "stream": True,
-        "instructions": context.system_prompt or "You are a helpful assistant.",
+        "instructions": instructions,
         "input": messages,
         "text": {"verbosity": opts.get("text_verbosity", "medium")},
         "include": ["reasoning.encrypted_content"],

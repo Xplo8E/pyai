@@ -9,6 +9,8 @@ accepts a chat model — chains, agents, MCP tool servers, etc.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import json
 from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator, Sequence
 
 if TYPE_CHECKING:
@@ -23,15 +25,19 @@ from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
     BaseMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
+)
+from langchain_core.output_parsers.openai_tools import (
+    JsonOutputKeyToolsParser,
+    PydanticToolsParser,
 )
 from langchain_core.outputs import (
     ChatGeneration,
     ChatGenerationChunk,
     ChatResult,
 )
+from langchain_core.runnables import RunnableParallel, RunnablePassthrough
+from langchain_core.utils.function_calling import convert_to_openai_tool
+from pydantic import BaseModel
 
 from ..stream import stream as piai_stream
 from ..types import (
@@ -68,30 +74,15 @@ def _lc_messages_to_piai(messages: list[BaseMessage]) -> Context:
 
     for msg in messages:
         if msg.type == "system":
-            system_prompt = msg.content if isinstance(msg.content, str) else str(msg.content)
+            system_prompt = _extract_text_from_content(msg.content)
 
         elif msg.type == "human":
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            piai_msgs.append(UserMessage(content=content))
+            piai_msgs.append(UserMessage(content=_extract_text_from_content(msg.content)))
 
         elif msg.type == "ai":
             blocks = []
             if msg.content:
-                if isinstance(msg.content, str):
-                    text = msg.content
-                elif isinstance(msg.content, list):
-                    # Extract text from content blocks (e.g. [{"type": "text", "text": "..."}])
-                    parts = []
-                    for item in msg.content:
-                        if isinstance(item, str):
-                            parts.append(item)
-                        elif isinstance(item, dict) and item.get("type") == "text":
-                            parts.append(item.get("text", ""))
-                        elif isinstance(item, dict):
-                            parts.append(str(item.get("text", item)))
-                    text = "".join(parts)
-                else:
-                    text = str(msg.content)
+                text = _extract_text_from_content(msg.content)
                 if text:
                     blocks.append(TextContent(text=text))
             if msg.tool_calls:
@@ -106,11 +97,28 @@ def _lc_messages_to_piai(messages: list[BaseMessage]) -> Context:
             piai_msgs.append(
                 ToolResultMessage(
                     tool_call_id=msg.tool_call_id,
-                    content=msg.content if isinstance(msg.content, str) else str(msg.content),
+                    content=_extract_text_from_content(msg.content),
                 )
             )
 
     return Context(system_prompt=system_prompt, messages=piai_msgs)
+
+
+def _extract_text_from_content(content: Any) -> str:
+    """Extract plain text from a LangChain message content (str or list of blocks)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text":
+                parts.append(item.get("text", ""))
+            elif isinstance(item, dict):
+                parts.append(str(item.get("text", item)))
+        return "".join(parts)
+    return str(content)
 
 
 def _lc_tools_to_piai(tools: list[dict]) -> list[Tool]:
@@ -170,16 +178,12 @@ class PiAIChatModel(BaseChatModel):
         asyncio.run() fails with 'cannot be called from a running event loop'.
         In that case we dispatch to a thread with its own fresh event loop.
         """
-        import concurrent.futures
-
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
 
         if loop is not None and loop.is_running():
-            # Already inside an event loop (LangGraph, Jupyter, etc.)
-            # Run in a thread with its own event loop.
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(asyncio.run, coro)
                 return future.result()
@@ -272,8 +276,6 @@ class PiAIChatModel(BaseChatModel):
 
         # Track tool call index for LangChain chunk merging
         tc_index: dict[str, int] = {}
-        # Map piai tool_call.id → truncated id safe for the API (max 64 chars)
-        tc_id_map: dict[str, str] = {}
         # Accumulate thinking blocks for this response
         thinking_parts: list[str] = []
 
@@ -298,7 +300,6 @@ class PiAIChatModel(BaseChatModel):
                 idx = len(tc_index)
                 safe_id = event.tool_call.id[:64]
                 tc_index[event.tool_call.id] = idx
-                tc_id_map[event.tool_call.id] = safe_id
                 yield ChatGenerationChunk(
                     message=AIMessageChunk(
                         content="",
@@ -332,8 +333,7 @@ class PiAIChatModel(BaseChatModel):
                 # This cross-checks the accumulated delta JSON and handles the edge case
                 # where the last delta was empty or missing.
                 idx = tc_index.get(event.tool_call.id, 0)
-                import json as _json
-                canonical_args = _json.dumps(event.tool_call.input or {})
+                canonical_args = json.dumps(event.tool_call.input or {})
                 yield ChatGenerationChunk(
                     message=AIMessageChunk(
                         content="",
@@ -377,8 +377,6 @@ class PiAIChatModel(BaseChatModel):
         Accepts anything LangChain's convert_to_openai_tool() understands:
         BaseTool instances, dicts, Pydantic models, or plain functions.
         """
-        from langchain_core.utils.function_calling import convert_to_openai_tool
-
         formatted = [convert_to_openai_tool(t) for t in tools]
         bound_kwargs: dict[str, Any] = {"tools": formatted}
         if tool_choice:
@@ -434,14 +432,6 @@ class PiAIChatModel(BaseChatModel):
                 "Supported methods: 'tool_calling'. "
                 "'json_mode' is planned but not yet implemented."
             )
-
-        from langchain_core.output_parsers.openai_tools import (
-            JsonOutputKeyToolsParser,
-            PydanticToolsParser,
-        )
-        from langchain_core.runnables import RunnableParallel, RunnablePassthrough
-        from langchain_core.utils.function_calling import convert_to_openai_tool
-        from pydantic import BaseModel
 
         # Use LangChain's conversion to get the canonical tool name.
         # This avoids mismatches for TypedDict/dict schemas.
