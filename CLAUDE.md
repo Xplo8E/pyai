@@ -53,18 +53,23 @@ tests/
     test_langchain.py
     test_langgraph_integration.py
     test_thinking.py         # thinking/observability events (34 tests)
+    test_sdk_extensions.py   # scratchpad, context_reducer, usage, context_extractor (16 tests)
+    test_coverage_boost.py   # broad coverage across usage/, oauth/, agent, stream (68+ tests)
 docs/
     architecture.md          # Design overview and flow diagrams
     internals.md             # Per-module deep-dive
-    mcp.md                   # Full MCP + observability reference
+    mcp.md                   # Full MCP + observability reference (includes scratchpad, context_reducer, usage)
     contributing.md          # Setup and contribution guide
-    AGENTS.md                # This file
+    AGENTS.md                # This file (full feature reference)
 examples/
     mcp_filesystem_agent.py          # piai native agent + MCP filesystem
     langchain_mcp_agent.py           # PiAIChatModel + LangChain + MCP
     radare2_binary_analysis.py       # piai agent + r2mcp binary RE
     ida_binary_analysis.py           # piai agent + IDA Pro MCP
     langgraph_supervisor_agent.py    # LangGraph Supervisor + SubAgentTool
+    sdk_extensions_demo.py           # 4 features — offline/mocked demo
+    sdk_extensions_live.py           # 4 features — real LLM calls
+    sdk_edge_cases_live.py           # edge cases: async reducer, token budget, scratchpad memory
 ```
 
 ---
@@ -133,130 +138,6 @@ servers = MCPServer.from_toml("~/.piai/config.toml")  # loads [mcp_servers] sect
 
 ---
 
-## Context.scratchpad — persistent working memory
-
-`Context.scratchpad` is a `dict[str, Any]` that is injected into the system prompt as a `<scratchpad>` JSON block on **every** LLM call. Use it to give the agent persistent working memory that survives message history trimming.
-
-```python
-from piai import agent
-from piai.types import Context, UserMessage, Tool
-
-ctx = Context(
-    system_prompt="You are a stateful math agent.",
-    messages=[UserMessage(content="Compute 7 × 6 and save the result, then double it.")],
-    scratchpad={"saved_result": None},
-    tools=[
-        Tool(name="save_result", description="Save a number.", parameters={...}),
-        Tool(name="get_double", description="Return 2× the saved value.", parameters={...}),
-    ],
-)
-
-def save_result(value: float) -> str:
-    ctx.scratchpad["saved_result"] = value
-    return f"Saved {value}"
-
-def get_double() -> str:
-    v = ctx.scratchpad.get("saved_result")
-    return f"2 × {v} = {v * 2}" if v is not None else "Nothing saved yet."
-
-result = await agent(
-    model_id="gpt-5.1-codex-mini",
-    context=ctx,
-    local_handlers={"save_result": save_result, "get_double": get_double},
-)
-```
-
-**What the model sees each turn:**
-
-```
-<system prompt>
-
-<scratchpad>
-{
-  "saved_result": 42
-}
-</scratchpad>
-```
-
-The scratchpad block is omitted when the dict is empty. Tool handlers can mutate it freely — the updated values appear in the next turn's prompt automatically.
-
----
-
-## context_reducer — prevent unbounded context growth
-
-`context_reducer` is called at the end of each agent turn (after all tool results are appended, before the next LLM call). It receives the current `Context` and must return a new (possibly trimmed) `Context`. Use it to keep long-running agents from blowing up the context window.
-
-```python
-def sliding_window(ctx: Context) -> Context:
-    """Keep only the last 4 messages."""
-    return Context(
-        messages=ctx.messages[-4:],
-        system_prompt=ctx.system_prompt,
-        tools=ctx.tools,
-        scratchpad=ctx.scratchpad,
-    )
-
-result = await agent(
-    model_id="gpt-5.1-codex-mini",
-    context=ctx,
-    local_handlers={...},
-    max_turns=20,
-    context_reducer=sliding_window,
-)
-```
-
-**Async reducers are supported** — return a coroutine and piai awaits it automatically:
-
-```python
-async def summarizing_reducer(ctx: Context) -> Context:
-    summary = await call_summarization_api(ctx.messages)
-    return Context(
-        messages=[UserMessage(content=f"Summary: {summary}")],
-        system_prompt=ctx.system_prompt,
-        tools=ctx.tools,
-        scratchpad=ctx.scratchpad,
-    )
-```
-
-**When it runs:** after tool results are appended, before the next `stream()` call. The scratchpad is preserved by default — you must explicitly carry it forward if you reconstruct the Context.
-
----
-
-## AgentTurnEndEvent.usage — per-turn token counts
-
-`AgentTurnEndEvent` now includes a `usage` dict with real token counts from the model response:
-
-```python
-from piai.types import AgentTurnEndEvent
-
-total_tokens = 0
-
-def on_event(event):
-    if isinstance(event, AgentTurnEndEvent):
-        total_tokens += event.usage.get("total_tokens", 0)
-        print(f"Turn {event.turn}: {event.usage}")
-        # {'input': 1200, 'output': 80, 'cache_read': 400, 'total_tokens': 1280}
-
-result = await agent(
-    model_id="gpt-5.1-codex-mini",
-    context=ctx,
-    on_event=on_event,
-)
-```
-
-**Usage dict keys:**
-
-| Key | Description |
-|---|---|
-| `input` | Input tokens consumed this turn |
-| `output` | Output tokens generated this turn |
-| `cache_read` | Tokens served from prompt cache (not billed) |
-| `total_tokens` | `input + output` (before cache deduction) |
-
-Use this for token budgeting, cost tracking, and rate-limit awareness across multi-turn sessions.
-
----
-
 ## Thinking / reasoning observability
 
 Reasoning models emit `ThinkingContent` blocks. piai surfaces these as stream events and convenience properties.
@@ -270,7 +151,7 @@ Reasoning models emit `ThinkingContent` blocks. piai surfaces these as stream ev
 | `ThinkingEndEvent(thinking: str)` | Block done — `thinking` is always the full accumulated text |
 | `AgentToolCallEvent(turn, tool_name, tool_input)` | Fired just before a tool is executed |
 | `AgentToolResultEvent(turn, tool_name, tool_input, result, error)` | Fired after tool execution |
-| `AgentTurnEndEvent(turn, thinking, tool_calls, usage)` | End of each agent loop turn |
+| `AgentTurnEndEvent(turn, thinking, tool_calls)` | End of each agent loop turn |
 
 ### AssistantMessage properties
 
@@ -315,99 +196,6 @@ print(result.content)
 
 Supports `invoke`, `ainvoke`, `stream`, `astream`, `bind_tools`. Thinking is surfaced via `additional_kwargs["thinking"]` on the final message and `additional_kwargs["thinking_delta"]` on streaming chunks.
 
-### with_structured_output
-
-`PiAIChatModel` implements the standard LangChain `with_structured_output()` interface. Pass a Pydantic model or TypedDict and get back a typed instance directly.
-
-```python
-from pydantic import BaseModel
-from piai.langchain import PiAIChatModel
-from langchain_core.messages import HumanMessage
-
-class VulnReport(BaseModel):
-    target: str
-    severity: str
-    description: str
-
-llm = PiAIChatModel(model_name="gpt-5.1-codex-mini")
-chain = llm.with_structured_output(VulnReport)
-report = chain.invoke([HumanMessage(content="Assess libcrypto.so")])
-# report is a VulnReport instance
-print(report.severity)
-```
-
-**TypedDict schemas** also work — returns a plain dict:
-
-```python
-from typing import TypedDict
-
-class Finding(TypedDict):
-    cve: str
-    cvss: float
-
-chain = llm.with_structured_output(Finding)
-finding = chain.invoke([HumanMessage(content="Summarize CVE-2024-1234")])
-# finding is {'cve': 'CVE-2024-1234', 'cvss': 7.5}
-```
-
-**include_raw** mode returns both the raw `AIMessage` and the parsed instance:
-
-```python
-chain = llm.with_structured_output(VulnReport, include_raw=True)
-result = chain.invoke([...])
-# result = {"raw": AIMessage(...), "parsed": VulnReport(...)}
-```
-
-Works with `create_supervisor`, `create_react_agent`, and any LangChain chain that uses structured output. Only `method="tool_calling"` is supported (the default); `json_mode` is planned.
-
-### SubAgentTool — context isolation with context_extractor
-
-`SubAgentTool` wraps a full piai `agent()` as a single LangChain `BaseTool`. The `context_extractor` parameter gives you precise control over what context the sub-agent sees — strip orchestrator history, forward only relevant scratchpad keys.
-
-```python
-from piai.langchain.sub_agent_tool import SubAgentTool
-from piai.types import Context, UserMessage
-
-parent_ctx = Context(
-    messages=[...],  # fat orchestrator history
-    scratchpad={
-        "job_id": "scan-001",
-        "scan_queue": ["libssl.so", "libxml2.so"],
-        "total_findings": 3,
-        "irrelevant_key": "noise",
-    },
-)
-
-def isolating_extractor(ctx: Context) -> Context:
-    """Strip orchestrator history. Pass only what the sub-agent needs."""
-    target = ctx.scratchpad.get("scan_queue", ["unknown"])[0]
-    return Context(
-        system_prompt="You are a security pre-screener. Assess the library briefly.",
-        messages=[UserMessage(content=f"Assess {target}")],
-        scratchpad={"target": target, "job_id": ctx.scratchpad["job_id"]},
-    )
-
-sub = SubAgentTool(
-    name="assessor",
-    description="Security pre-screener for native libraries.",
-    model_id="gpt-5.1-codex-mini",
-    initial_context=parent_ctx,
-    context_extractor=isolating_extractor,
-)
-
-result = await sub._arun(task="assess libssl.so")
-```
-
-**Async extractors** are supported — return a coroutine and piai awaits it:
-
-```python
-async def async_extractor(ctx: Context) -> Context:
-    metadata = await fetch_metadata(ctx.scratchpad["job_id"])
-    return Context(system_prompt=f"Context: {metadata}", messages=[...])
-```
-
-**No initial_context**: if `initial_context` is omitted, a fresh `Context` is built from the task string. The extractor still runs — use it to enrich the fresh context with a system prompt or scratchpad values.
-
 ---
 
 ## Critical invariants (do not break these)
@@ -426,10 +214,11 @@ async def async_extractor(ctx: Context) -> Context:
 12. **`asyncio.get_running_loop()`** — All async dispatch uses `get_running_loop()` (not the deprecated `get_event_loop()`). When already inside a running loop (LangGraph, Jupyter), dispatch to a thread with its own `asyncio.run()`.
 13. **`ThinkingEndEvent.thinking` is authoritative** — Backend may skip `ThinkingDeltaEvent` deltas for short reasoning blocks. Always use `ThinkingEndEvent.thinking` (reconstructed from summary parts) as the canonical full text.
 14. **`AssistantMessage.thinking` returns `None` not `""`** — When no ThinkingContent blocks are present. Callers check `if result.thinking:` not `if result.thinking is not None:`.
-15. **`context_reducer` receives a copy** — `_run_loop` builds an internal `ctx` with `scratchpad=dict(context.scratchpad)`. Mutating the returned Context does not affect the original `Context` passed to `agent()`. The reducer itself must preserve the scratchpad if needed.
-16. **`context_extractor` in `SubAgentTool` runs on a copy** — `initial_context` is passed as-is; the extractor gets the full parent Context and must explicitly include only what the sub-agent needs. If the extractor doesn't append a `UserMessage`, the task string is appended automatically.
-17. **`AgentTurnEndEvent.usage` is a copy** — `dict(final_message.usage)`. Mutating it has no effect on the message.
-18. **`with_structured_output` uses `tool_choice="required"`** — The backend does not support tool-name forcing; `"required"` is used instead. Only one tool is bound, so the model always calls the schema tool.
+15. **`Context.scratchpad` injected only when non-empty** — `build_request_body()` skips the `<scratchpad>` block entirely if `context.scratchpad` is `{}`. Default is `{}`.
+16. **`context_reducer` must carry scratchpad forward** — The reducer receives the full Context but must explicitly include `scratchpad=ctx.scratchpad` when constructing the returned Context, or scratchpad state is lost.
+17. **`AgentTurnEndEvent.usage` keys match Responses API fields** — `input`, `output`, `cache_read`, `total_tokens`. All default to `0` if the backend doesn't send them.
+18. **`SubAgentTool` auto-appends task message** — If `context_extractor` returns a Context whose last message is not a `UserMessage`, the `task` string is automatically appended as one. Prevents the sub-agent from getting a context with no task.
+19. **`with_structured_output` uses `tool_choice="required"`** — Backend rejects tool-name forcing; `"required"` is used instead. Only one tool is bound so the model always calls the schema tool. `json_mode` is not yet supported.
 
 ---
 
@@ -499,25 +288,21 @@ options = {
 ## Changelog
 
 ### 2026-03-22 — Code quality pass
-- **Refactor** Moved all inline imports to module level across 9 files (`cli.py`, `chat_model.py`, `sub_agent_tool.py`, `mcp/langchain_tools.py`, `mcp/server.py`, `usage/*.py`)
-- **Refactor** Extracted nested functions in `oauth/openai_codex.py` (`Handler`, `_wait_browser`, `_get_manual`) and `usage/openai_codex.py` (`_window()`)
-- **Refactor** `agent.py`: removed duplicated `_run_loop` call branches via `loop_kwargs` dict; merged `if hub: … else:` context construction
-- **Refactor** `chat_model.py`: extracted `_extract_text_from_content()` helper to flatten deeply nested content extraction
-- **Bug fix** `providers/openai_codex.py`: `name` referenced before assignment in `logger.warning` on `function_call` done path — reordered extraction before try/except
-- **Cleanup** Removed unused `tc_id_map` dict and 3 unused imports in `chat_model.py`
-- **Perf** Compiled `_USAGE_LIMIT_PATTERN` regex at module level in `providers/openai_codex.py`
-- **Dedup** `OPENAI_CODEX_PROVIDER` constant now imported from `stream.py` in `agent.py` instead of redefined
+- **Refactor** Moved all inline imports to module level across 9 files; extracted nested functions in `oauth/openai_codex.py` and `usage/openai_codex.py`
+- **Bug fix** `providers/openai_codex.py`: `name` referenced before assignment on `function_call` done path
+- **Cleanup** Removed unused `tc_id_map` and 3 unused imports in `chat_model.py`; compiled `_USAGE_LIMIT_PATTERN` regex at module level
+- **Dedup** `OPENAI_CODEX_PROVIDER` no longer redefined in `agent.py` — imported from `stream.py`
+- **Docs** Updated `AGENTS.md`, `mcp.md`, and `CLAUDE.md` with full documentation for all new features
 
-### 2026-03-22 — SDK extensions: scratchpad, context_reducer, usage, SubAgentTool context_extractor, with_structured_output
-- **New** `Context.scratchpad: dict[str, Any]` — persistent working memory injected as `<scratchpad>` JSON block into every LLM call's system prompt
-- **New** `agent(context_reducer=...)` — hook called after each turn's tool results, before next LLM call; supports sync and async callables; prevents unbounded context growth
-- **New** `AgentTurnEndEvent.usage` — per-turn token counts dict: `input`, `output`, `cache_read`, `total_tokens`
-- **New** `SubAgentTool(initial_context=..., context_extractor=...)` — pass parent context + an extractor that filters/transforms it before the sub-agent runs; async extractors supported
-- **New** `PiAIChatModel.with_structured_output(schema)` — standard LangChain interface; Pydantic models and TypedDicts; `include_raw=True` returns `{"raw": AIMessage, "parsed": instance}`
-- **Fix** `agent.py`: `_run_loop` now correctly copies `context.scratchpad` into internal `ctx`
-- **Examples** Added `examples/sdk_extensions_demo.py` (offline), `examples/sdk_extensions_live.py` (real LLM), `examples/sdk_edge_cases_live.py` (edge cases)
-- **Tests** Added `tests/test_sdk_extensions.py` (16 tests) and `tests/test_coverage_boost.py` (68+ tests)
-- **Total tests:** 381
+### 2026-03-22 — SDK extensions
+- **New** `Context.scratchpad: dict[str, Any]` — injected as `<scratchpad>` JSON block into every LLM call
+- **New** `agent(context_reducer=...)` — called after each turn's tool results, before next LLM call; sync and async supported
+- **New** `AgentTurnEndEvent.usage` — per-turn token counts: `input`, `output`, `cache_read`, `total_tokens`
+- **New** `SubAgentTool(initial_context=..., context_extractor=...)` — filter/transform parent context before sub-agent runs
+- **New** `PiAIChatModel.with_structured_output(schema)` — Pydantic models and TypedDicts; `include_raw` mode
+- **Fix** `agent.py`: `_run_loop` now correctly copies `context.scratchpad` into internal ctx
+- **Examples** `sdk_extensions_demo.py`, `sdk_extensions_live.py`, `sdk_edge_cases_live.py`
+- **Tests** `test_sdk_extensions.py` (16 tests), `test_coverage_boost.py` (68+ tests) — **Total: 381**
 
 ### 2026-03-20 — Thinking/reasoning observability
 - **New** `ThinkingStartEvent`, `ThinkingEndEvent(thinking: str)` in `types.py` — bracket reasoning blocks; `ThinkingEndEvent.thinking` always has full text

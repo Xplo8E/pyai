@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+import time
+import webbrowser
 
 import click
 
@@ -30,10 +32,15 @@ def _quiet_threading_excepthook(args):
 
 threading.excepthook = _quiet_threading_excepthook
 
+import json
+
 from . import __version__
 from .oauth import get_oauth_provider, get_oauth_providers
 from .oauth.storage import delete_credentials, get_provider_credentials, save_credentials
 from .oauth.types import OAuthAuthInfo, OAuthLoginCallbacks, OAuthPrompt
+from .stream import stream
+from .types import Context, DoneEvent, ErrorEvent, TextDeltaEvent, UserMessage
+from .usage import get_provider_usage, render
 
 
 @click.group()
@@ -83,8 +90,6 @@ def login(provider: str):
 
 
 async def _do_login(provider):
-    import webbrowser
-
     def on_auth(info: OAuthAuthInfo):
         click.echo(f"\n{info.instructions or 'Opening browser...'}")
         click.echo(f"URL: {info.url}\n")
@@ -144,8 +149,6 @@ def list_providers():
 @cli.command()
 def status():
     """Show login status for all providers."""
-    import time
-
     providers = get_oauth_providers()
     click.echo("Login status:")
     for p in providers:
@@ -177,11 +180,6 @@ def usage(provider: str, raw: bool):
 
 
 async def _do_usage(provider_id: str, raw: bool):
-    import json as _json
-    from .oauth.storage import get_provider_credentials, save_credentials
-    from .oauth import get_oauth_provider
-    from .usage import get_provider_usage, render
-
     creds = get_provider_credentials(provider_id)
     if creds is None:
         click.echo(f"Not logged in for provider: {provider_id}. Run: piai login {provider_id}", err=True)
@@ -201,7 +199,7 @@ async def _do_usage(provider_id: str, raw: bool):
     report = await get_provider_usage(provider_id, creds)
 
     if raw:
-        click.echo(_json.dumps(report.raw, indent=2))
+        click.echo(json.dumps(report.raw, indent=2))
         return
 
     render(report)
@@ -229,9 +227,6 @@ def run(prompt: str, model: str, system: str | None, provider: str):
 
 
 async def _do_run(prompt: str, model: str, system: str | None, provider: str):
-    from .stream import stream
-    from .types import Context, TextDeltaEvent, DoneEvent, ErrorEvent, UserMessage
-
     context = Context(
         messages=[UserMessage(content=prompt)],
         system_prompt=system,

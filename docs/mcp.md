@@ -165,8 +165,59 @@ result = await agent(
     require_all_servers=False,          # True = raise if any server fails to connect
     connect_timeout=60.0,               # per-server connection timeout in seconds
     tool_result_max_chars=32_000,       # max chars per tool result (prevents context explosion)
+    context_reducer=my_reducer,         # optional hook to trim/summarize context each turn
+    local_handlers={"tool": fn},        # pure Python tool handlers (sync or async)
 )
 ```
+
+### Context.scratchpad — persistent working memory
+
+Pass `scratchpad` in the `Context` to give the agent persistent state across turns. It is serialized as a `<scratchpad>` JSON block and injected into the system prompt on every LLM call — even if message history is trimmed.
+
+```python
+ctx = Context(
+    system_prompt="You are a stateful analyst.",
+    messages=[UserMessage(content="Track findings across scans.")],
+    scratchpad={"findings": [], "scanned": 0},
+)
+
+def record_finding(severity: str, description: str) -> str:
+    ctx.scratchpad["findings"].append({"severity": severity, "description": description})
+    ctx.scratchpad["scanned"] += 1
+    return "Recorded."
+
+result = await agent(
+    model_id="gpt-5.1-codex-mini",
+    context=ctx,
+    local_handlers={"record_finding": record_finding},
+    mcp_servers=[...],
+)
+# ctx.scratchpad["findings"] has all findings the model recorded
+```
+
+### context_reducer — prevent context explosion
+
+`context_reducer` is called after each turn's tool results are appended, before the next LLM call. Return a trimmed or summarized `Context`.
+
+```python
+def sliding_window(ctx: Context) -> Context:
+    return Context(
+        messages=ctx.messages[-6:],     # keep last 6 messages
+        system_prompt=ctx.system_prompt,
+        tools=ctx.tools,
+        scratchpad=ctx.scratchpad,      # always carry scratchpad forward
+    )
+
+result = await agent(
+    model_id="gpt-5.1-codex-mini",
+    context=ctx,
+    mcp_servers=[...],
+    max_turns=50,
+    context_reducer=sliding_window,
+)
+```
+
+Async reducers are supported — return a coroutine.
 
 ---
 
@@ -195,7 +246,32 @@ result = await agent(
 |---|---|---|
 | `AgentToolCallEvent` | `turn: int`, `tool_name: str`, `tool_input: dict` | Just before a tool is executed |
 | `AgentToolResultEvent` | `turn: int`, `tool_name: str`, `tool_input: dict`, `result: str`, `error: bool` | After tool execution completes |
-| `AgentTurnEndEvent` | `turn: int`, `thinking: str \| None`, `tool_calls: list[ToolCall]` | Summary at end of each loop turn |
+| `AgentTurnEndEvent` | `turn: int`, `thinking: str \| None`, `tool_calls: list[ToolCall]`, `usage: dict` | Summary at end of each loop turn |
+
+**`AgentTurnEndEvent.usage` keys:**
+
+| Key | Description |
+|---|---|
+| `input` | Input tokens this turn |
+| `output` | Output tokens this turn |
+| `cache_read` | Tokens served from prompt cache |
+| `total_tokens` | `input + output` (before cache deduction) |
+
+Use `usage` to track cumulative token spend, implement token budgets, or log per-turn cost:
+
+```python
+from piai.types import AgentTurnEndEvent
+
+cumulative = 0
+
+def on_event(event):
+    global cumulative
+    if isinstance(event, AgentTurnEndEvent):
+        cumulative += event.usage.get("total_tokens", 0)
+        print(f"Turn {event.turn}: {event.usage}  (total so far: {cumulative})")
+        if cumulative > 5000:
+            raise RuntimeError("Token budget exceeded")
+```
 
 > `ThinkingEndEvent.thinking` always has the full text for the block even if `ThinkingDeltaEvent` was sparse or empty — the backend controls delta granularity.
 

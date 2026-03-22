@@ -32,6 +32,7 @@ Notes:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from typing import Any, Type
 
 from ..types import Tool
@@ -100,8 +101,6 @@ class MCPLangChainTool(BaseTool):
 
     def _run(self, **kwargs: Any) -> str:
         """Sync run — safely handles running event loop (e.g. inside LangGraph threads)."""
-        import concurrent.futures
-
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:

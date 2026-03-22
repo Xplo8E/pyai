@@ -17,7 +17,7 @@ from typing import Any
 
 from .mcp.hub import MCPHub
 from .mcp.server import MCPServer
-from .stream import stream
+from .stream import OPENAI_CODEX_PROVIDER, stream
 from .types import (
     AgentToolCallEvent,
     AgentToolResultEvent,
@@ -36,8 +36,6 @@ from .types import (
 
 logger = logging.getLogger(__name__)
 
-OPENAI_CODEX_PROVIDER = "openai-codex"
-
 
 async def agent(
     model_id: str,
@@ -51,6 +49,7 @@ async def agent(
     connect_timeout: float = 60.0,
     tool_result_max_chars: int = 32_000,
     local_handlers: dict[str, Callable[..., Any]] | None = None,
+    context_reducer: Callable[[Context], Context] | None = None,
 ) -> AssistantMessage:
     """
     Run an autonomous agentic loop, optionally with MCP tool servers.
@@ -75,6 +74,12 @@ async def agent(
                              Default False — partial connections allowed.
         connect_timeout:     Per-server connection timeout in seconds. Default 60.
         tool_result_max_chars: Max chars per tool result fed back to model. Default 32000.
+        context_reducer:     Optional hook called at the end of each turn (after all tool
+                             results are appended) and before the next LLM call. Receives
+                             the current Context and must return a (possibly trimmed or
+                             summarized) Context. Use this to prevent unbounded context growth
+                             in long-running agents — e.g. summarize old tool results, drop
+                             irrelevant messages, or compress history once a threshold is hit.
 
     Returns:
         The final AssistantMessage after the model stops.
@@ -106,6 +111,17 @@ async def agent(
         )
     """
     servers = mcp_servers or []
+    loop_kwargs = dict(
+        model_id=model_id,
+        context=context,
+        options=options,
+        provider_id=provider_id,
+        max_turns=max_turns,
+        on_event=on_event,
+        tool_result_max_chars=tool_result_max_chars,
+        local_handlers=local_handlers,
+        context_reducer=context_reducer,
+    )
 
     if servers:
         hub = MCPHub(
@@ -115,30 +131,9 @@ async def agent(
             tool_result_max_chars=tool_result_max_chars,
         )
         async with hub:
-            return await _run_loop(
-                model_id=model_id,
-                context=context,
-                hub=hub,
-                options=options,
-                provider_id=provider_id,
-                max_turns=max_turns,
-                on_event=on_event,
-                tool_result_max_chars=tool_result_max_chars,
-                local_handlers=local_handlers,
-            )
+            return await _run_loop(hub=hub, **loop_kwargs)
     else:
-        # No MCP servers — run loop without tool injection
-        return await _run_loop(
-            model_id=model_id,
-            context=context,
-            hub=None,
-            options=options,
-            provider_id=provider_id,
-            max_turns=max_turns,
-            on_event=on_event,
-            tool_result_max_chars=tool_result_max_chars,
-            local_handlers=local_handlers,
-        )
+        return await _run_loop(hub=None, **loop_kwargs)
 
 
 async def _run_loop(
@@ -151,6 +146,7 @@ async def _run_loop(
     on_event: Callable[[StreamEvent], Any] | None,
     tool_result_max_chars: int,
     local_handlers: dict[str, Callable[..., Any]] | None = None,
+    context_reducer: Callable[[Context], Context] | None = None,
 ) -> AssistantMessage:
     """Internal agentic loop."""
     # Build working context — inject MCP tools if available
@@ -163,17 +159,15 @@ async def _run_loop(
         extra_tools = [t for t in (context.tools or []) if t.name not in existing_names]
         merged = mcp_tools + extra_tools
         combined_tools = merged if merged else None
-        ctx = Context(
-            messages=list(context.messages),
-            system_prompt=context.system_prompt,
-            tools=combined_tools,
-        )
     else:
-        ctx = Context(
-            messages=list(context.messages),
-            system_prompt=context.system_prompt,
-            tools=context.tools,
-        )
+        combined_tools = context.tools
+
+    ctx = Context(
+        messages=list(context.messages),
+        system_prompt=context.system_prompt,
+        tools=combined_tools,
+        scratchpad=dict(context.scratchpad),
+    )
 
     # Warn if any tool is visible to the model but has no executor.
     # Tools are executable if they are in local_handlers OR discoverable via the hub.
@@ -214,14 +208,16 @@ async def _run_loop(
         if done_event is None:
             raise RuntimeError("Stream ended without a done event")
 
-        # Collect thinking from this turn's message
+        # Collect thinking and usage from this turn's message
         turn_thinking = final_message.thinking if final_message else None
+        turn_usage = dict(final_message.usage) if final_message else {}
 
         # Fire turn-end summary event (useful for observability dashboards)
         await _fire_event(on_event, AgentTurnEndEvent(
             turn=turn + 1,
             thinking=turn_thinking,
             tool_calls=list(tool_calls_made),
+            usage=turn_usage,
         ))
 
         # No tool calls → model is done
@@ -256,6 +252,15 @@ async def _run_loop(
                     content=result,
                 )
             )
+
+        # Apply context reducer if provided — runs after all tool results are appended,
+        # before the next LLM call. Lets callers trim/summarize history to control growth.
+        if context_reducer is not None:
+            reduced = context_reducer(ctx)
+            if inspect.isawaitable(reduced):
+                reduced = await reduced
+            ctx = reduced
+            logger.debug("context_reducer applied: %d messages remaining", len(ctx.messages))
 
         logger.debug(
             "Turn %d complete: %d tool call(s) executed, continuing...",

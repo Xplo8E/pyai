@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from ..providers.openai_codex import DEFAULT_CODEX_BASE_URL, _user_agent
 from .report import Subscription, UsageReport, UsageWindow
 
 if TYPE_CHECKING:
@@ -25,8 +26,6 @@ async def fetch(
     account_id: str,
     base_url: str | None = None,
 ) -> UsageReport:
-    from ..providers.openai_codex import DEFAULT_CODEX_BASE_URL, _user_agent
-
     base = (base_url or DEFAULT_CODEX_BASE_URL).rstrip("/")
     headers = {
         "Authorization": f"Bearer {token}",
@@ -109,38 +108,39 @@ def _apply_accounts_check(report: UsageReport, data: dict[str, Any]) -> None:
         report.subscription = Subscription(active=False)
 
 
+def _build_window(group: str, name: str, w: dict[str, Any]) -> UsageWindow:
+    pct = w.get("used_percent", 0)
+    reset_at = w.get("reset_at")
+    reset_after = w.get("reset_after_seconds")
+    if reset_at:
+        resets_str = _fmt_reset(reset_at)
+    elif reset_after:
+        resets_str = _fmt_seconds(reset_after)
+    else:
+        resets_str = "unknown"
+    return UsageWindow(
+        name=name,
+        group=group,
+        used_percent=pct,
+        resets_str=resets_str,
+        resets_at=reset_at,
+    )
+
+
 def _parse_wham(data: dict[str, Any]) -> list[UsageWindow]:
     entries: list[UsageWindow] = []
 
-    def _window(group: str, name: str, w: dict[str, Any]) -> UsageWindow:
-        pct = w.get("used_percent", 0)
-        reset_at = w.get("reset_at")
-        reset_after = w.get("reset_after_seconds")
-        if reset_at:
-            resets_str = _fmt_reset(reset_at)
-        elif reset_after:
-            resets_str = _fmt_seconds(reset_after)
-        else:
-            resets_str = "unknown"
-        return UsageWindow(
-            name=name,
-            group=group,
-            used_percent=pct,
-            resets_str=resets_str,
-            resets_at=reset_at,
-        )
-
     rl = data.get("rate_limit") or {}
     if rl.get("primary_window"):
-        entries.append(_window("Codex", "5-hour", rl["primary_window"]))
+        entries.append(_build_window("Codex", "5-hour", rl["primary_window"]))
     if rl.get("secondary_window"):
-        entries.append(_window("Codex", "weekly", rl["secondary_window"]))
+        entries.append(_build_window("Codex", "weekly", rl["secondary_window"]))
 
     crl = data.get("code_review_rate_limit") or {}
     if crl.get("primary_window"):
-        entries.append(_window("Code review", "weekly", crl["primary_window"]))
+        entries.append(_build_window("Code review", "weekly", crl["primary_window"]))
     if crl.get("secondary_window"):
-        entries.append(_window("Code review", "secondary", crl["secondary_window"]))
+        entries.append(_build_window("Code review", "secondary", crl["secondary_window"]))
 
     return entries
 

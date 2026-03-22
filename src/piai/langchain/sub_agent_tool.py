@@ -51,7 +51,9 @@ Requires:
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional, Type
+import concurrent.futures
+import inspect
+from typing import Any, Callable, Optional, Type
 
 try:
     from langchain_core.tools import BaseTool
@@ -112,13 +114,16 @@ class SubAgentTool(BaseTool):
     options: dict[str, Any] = {}
     on_event: Optional[Any] = None  # Callable[[StreamEvent], Any] | None
     local_handlers: Optional[dict[str, Any]] = None  # tool_name -> Callable for tools not routed to MCP
+    context_extractor: Optional[Any] = None  # Callable[[Context], Context] | None
+    # initial_context lets the parent pass a pre-built Context to the sub-agent.
+    # context_extractor (if provided) is then applied to filter it down to only
+    # what the sub-agent needs — enforcing context isolation between tiers.
+    initial_context: Optional[Any] = None  # Context | None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _run(self, task: str, **kwargs: Any) -> str:
         """Sync run — safely handles running event loop (e.g. inside LangGraph threads)."""
-        import concurrent.futures
-
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -133,10 +138,31 @@ class SubAgentTool(BaseTool):
 
     async def _arun(self, task: str, **kwargs: Any) -> str:
         """Async run — spins up a full piai agent() for this task."""
-        ctx = Context(
-            system_prompt=self.system_prompt,
-            messages=[UserMessage(content=task)],
-        )
+        # Build starting context: prefer initial_context if provided, else fresh context.
+        if self.initial_context is not None:
+            ctx = self.initial_context
+        else:
+            ctx = Context(
+                system_prompt=self.system_prompt,
+                messages=[UserMessage(content=task)],
+            )
+
+        # Apply context_extractor to isolate only what this sub-agent needs.
+        # This enforces context isolation in multi-tier architectures — the extractor
+        # can strip irrelevant history, large task ledgers, etc., and append the task.
+        if self.context_extractor is not None:
+            extracted = self.context_extractor(ctx)
+            if inspect.isawaitable(extracted):
+                extracted = await extracted
+            ctx = extracted
+            # If the extractor didn't add the task message, append it now
+            if not ctx.messages or not isinstance(ctx.messages[-1], UserMessage):
+                ctx = Context(
+                    messages=list(ctx.messages) + [UserMessage(content=task)],
+                    system_prompt=ctx.system_prompt,
+                    tools=ctx.tools,
+                    scratchpad=ctx.scratchpad,
+                )
 
         result = await piai_agent(
             model_id=self.model_id,
@@ -148,10 +174,5 @@ class SubAgentTool(BaseTool):
             local_handlers=self.local_handlers,
         )
 
-        # Extract text from the final AssistantMessage
-        parts = []
-        for block in result.content:
-            if isinstance(block, TextContent) and block.text:
-                parts.append(block.text)
-
+        parts = [block.text for block in result.content if isinstance(block, TextContent) and block.text]
         return "\n\n".join(parts) if parts else "(agent produced no text output)"

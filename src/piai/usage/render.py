@@ -9,13 +9,19 @@ you need new display features.
 from __future__ import annotations
 
 import datetime
+import sys
 
 from .report import UsageReport
 
 
 
 _BAR_LEN = 22
-_BOX_W   = 52  # inner width (between │ chars)
+_BOX_W = 52  # inner width (between │ chars)
+_PLAN_LABELS = {
+    "plus": "ChatGPT Plus",
+    "pro": "ChatGPT Pro",
+    "free": "Free",
+}
 
 
 def render(report: UsageReport) -> None:
@@ -31,11 +37,6 @@ def render(report: UsageReport) -> None:
 
 
 def _render_header(report: UsageReport) -> None:
-    _PLAN_LABELS = {
-        "plus": "ChatGPT Plus",
-        "pro": "ChatGPT Pro",
-        "free": "Free",
-    }
     plan_label = _PLAN_LABELS.get(report.plan, report.plan.title())
     title = f" {report.provider_id} "
 
@@ -117,5 +118,4 @@ def _fmt_date(iso_str: str) -> str:
 
 
 def _warn(msg: str) -> None:
-    import sys
     print(msg, file=sys.stderr)

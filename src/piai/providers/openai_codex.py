@@ -20,9 +20,9 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from ..types import (
     AssistantMessage,
@@ -65,6 +65,10 @@ def _make_tc_id(call_id: str, item_id: str) -> str:
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _RETRYABLE_PATTERN = re.compile(
     r"rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused",
+    re.IGNORECASE,
+)
+_USAGE_LIMIT_PATTERN = re.compile(
+    r"usage_limit_reached|usage_not_included|rate_limit_exceeded",
     re.IGNORECASE,
 )
 
@@ -427,16 +431,6 @@ class _StreamProcessor:
                     args_str = item.get("arguments", "")
                     if not args_str and self._current_block and self._current_block.get("type") == "function_call":
                         args_str = self._current_block["args"]
-                    try:
-                        input_dict = json.loads(args_str) if args_str else {}
-                    except json.JSONDecodeError as _exc:
-                        logger.warning(
-                            "Tool %r: failed to parse arguments JSON %r: %s. Using {}.",
-                            name or (self._current_block or {}).get("name", "?"),
-                            args_str,
-                            _exc,
-                        )
-                        input_dict = {}
 
                     call_id = item.get("call_id", "")
                     item_id = item.get("id", "")
@@ -445,6 +439,17 @@ class _StreamProcessor:
                         call_id = self._current_block["call_id"]
                         item_id = self._current_block["item_id"]
                         name = self._current_block["name"]
+
+                    try:
+                        input_dict = json.loads(args_str) if args_str else {}
+                    except json.JSONDecodeError as _exc:
+                        logger.warning(
+                            "Tool %r: failed to parse arguments JSON %r: %s. Using {}.",
+                            name or "?",
+                            args_str,
+                            _exc,
+                        )
+                        input_dict = {}
 
                     tc = ToolCall(id=_make_tc_id(call_id, item_id), name=name, input=input_dict)
                     self._output.content.append(ToolCallContent(tool_calls=[tc]))
@@ -505,7 +510,7 @@ def _friendly_error(status: int, body: str) -> str:
         data = json.loads(body)
         err = data.get("error") or {}
         code = err.get("code", "") or err.get("type", "")
-        if re.search(r"usage_limit_reached|usage_not_included|rate_limit_exceeded", code, re.IGNORECASE) or status == 429:
+        if _USAGE_LIMIT_PATTERN.search(code) or status == 429:
             plan = f" ({err['plan_type'].lower()} plan)" if err.get("plan_type") else ""
             resets_at = err.get("resets_at")
             when = ""

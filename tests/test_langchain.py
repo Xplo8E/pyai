@@ -8,6 +8,7 @@ mocked — no real API calls are made.
 
 from __future__ import annotations
 
+from typing import TypedDict
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -571,3 +572,160 @@ class TestModelProperties:
     def test_options_stored(self):
         model = PiAIChatModel(options={"temperature": 0.7})
         assert model.options["temperature"] == 0.7
+
+
+# ------------------------------------------------------------------ #
+# PiAIChatModel.with_structured_output                               #
+# ------------------------------------------------------------------ #
+
+class TestWithStructuredOutput:
+    """Tests for with_structured_output() — behavior, not just presence."""
+
+    def _make_tool_call_stream(self, schema_name: str, args_json: str):
+        """
+        Helper: returns an async gen that simulates the model calling
+        `schema_name` tool with `args_json` as the arguments string.
+        """
+        import json
+
+        from piai.types import ToolCall, ToolCallDeltaEvent, ToolCallEndEvent
+
+        tc = ToolCall(id="call_struct_001", name=schema_name, input=json.loads(args_json))
+        return _make_async_gen(
+            ToolCallStartEvent(tool_call=tc),
+            ToolCallDeltaEvent(id="call_struct_001", json_delta=args_json),
+            ToolCallEndEvent(tool_call=tc),
+            DoneEvent(reason="tool_use"),
+        )
+
+    def test_returns_pydantic_instance(self):
+        """with_structured_output() should return a Pydantic model instance, not an AIMessage."""
+        from pydantic import BaseModel
+
+        class Answer(BaseModel):
+            value: int
+            explanation: str
+
+        model = PiAIChatModel()
+        chain = model.with_structured_output(Answer)
+
+        stream = self._make_tool_call_stream("Answer", '{"value": 42, "explanation": "forty-two"}')
+        with patch("piai.langchain.chat_model.piai_stream", side_effect=stream):
+            result = chain.invoke([HumanMessage(content="What is the answer?")])
+
+        assert isinstance(result, Answer)
+        assert result.value == 42
+        assert result.explanation == "forty-two"
+
+    def test_include_raw_single_llm_call(self):
+        """
+        include_raw=True must NOT invoke the LLM twice.
+        The model is called once; output fans to both 'raw' and 'parsed' branches.
+        """
+        from pydantic import BaseModel
+
+        class Simple(BaseModel):
+            result: str
+
+        model = PiAIChatModel()
+        chain = model.with_structured_output(Simple, include_raw=True)
+
+        stream = self._make_tool_call_stream("Simple", '{"result": "hello"}')
+
+        call_count = 0
+
+        async def counting_stream(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            async for event in stream(*args, **kwargs):
+                yield event
+
+        with patch("piai.langchain.chat_model.piai_stream", side_effect=counting_stream):
+            result = chain.invoke([HumanMessage(content="test")])
+
+        # LLM must be called exactly once even with include_raw=True
+        assert call_count == 1, f"LLM was called {call_count} times — expected 1"
+
+    def test_include_raw_returns_both_keys(self):
+        """include_raw=True should return dict with 'raw' (AIMessage) and 'parsed' (schema)."""
+        from pydantic import BaseModel
+
+        class Tag(BaseModel):
+            label: str
+
+        model = PiAIChatModel()
+        chain = model.with_structured_output(Tag, include_raw=True)
+
+        stream = self._make_tool_call_stream("Tag", '{"label": "critical"}')
+        with patch("piai.langchain.chat_model.piai_stream", side_effect=stream):
+            result = chain.invoke([HumanMessage(content="tag this")])
+
+        assert isinstance(result, dict), "include_raw=True should return a dict"
+        assert "raw" in result, "dict must have 'raw' key"
+        assert "parsed" in result, "dict must have 'parsed' key"
+        assert isinstance(result["parsed"], Tag)
+        assert result["parsed"].label == "critical"
+        # raw should be an AIMessage
+        assert isinstance(result["raw"], AIMessage)
+
+    def test_json_mode_raises_not_implemented(self):
+        """method='json_mode' must raise NotImplementedError — not silently fail."""
+        model = PiAIChatModel()
+        with pytest.raises(NotImplementedError, match="json_mode"):
+            model.with_structured_output(dict, method="json_mode")
+
+    def test_unknown_method_raises_value_error(self):
+        """An unrecognised method string must raise ValueError, not AttributeError."""
+        model = PiAIChatModel()
+        with pytest.raises(ValueError, match="Unknown method"):
+            model.with_structured_output(dict, method="xml_mode")
+
+    def test_typed_dict_schema_returns_dict(self):
+        """TypedDict schema should parse to dict (not raise parser errors)."""
+
+        class TargetSummary(TypedDict):
+            library_name: str
+            targets_found: int
+
+        model = PiAIChatModel()
+        chain = model.with_structured_output(TargetSummary)
+
+        stream = self._make_tool_call_stream(
+            "TargetSummary",
+            '{"library_name": "libfoo.so", "targets_found": 2}',
+        )
+        with patch("piai.langchain.chat_model.piai_stream", side_effect=stream):
+            result = chain.invoke([HumanMessage(content="Summarize findings")])
+
+        assert isinstance(result, dict)
+        assert result["library_name"] == "libfoo.so"
+        assert result["targets_found"] == 2
+
+    def test_openai_tool_dict_schema_returns_dict(self):
+        """OpenAI-style tool schema dict should parse to dict output."""
+        schema = {
+            "name": "FindingSchema",
+            "description": "Structured finding summary",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "library": {"type": "string"},
+                    "verdict": {"type": "string"},
+                },
+                "required": ["library", "verdict"],
+            },
+        }
+
+        model = PiAIChatModel()
+        chain = model.with_structured_output(schema)
+
+        stream = self._make_tool_call_stream(
+            "FindingSchema",
+            '{"library": "libssl.so", "verdict": "candidate"}',
+        )
+        with patch("piai.langchain.chat_model.piai_stream", side_effect=stream):
+            result = chain.invoke([HumanMessage(content="Return finding schema output")])
+
+        assert isinstance(result, dict)
+        assert result["library"] == "libssl.so"
+        assert result["verdict"] == "candidate"
