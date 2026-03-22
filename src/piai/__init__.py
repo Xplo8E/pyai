@@ -53,7 +53,7 @@ from .types import (
     UserMessage,
 )
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 
 __all__ = [
     "agent",
